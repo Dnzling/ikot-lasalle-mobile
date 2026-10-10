@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1002016926977",
+    "project_id": "ikot-lasalle-ccfab",
+    "storage_bucket": "ikot-lasalle-ccfab.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1002016926977:android:a9dc37107d13602467ff00",
+        "android_client_info": {
+          "package_name": "com.example.ikot_lasalle"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAWl-gllrN2h1i5ePjEtAPBBTU6RUUuOSc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

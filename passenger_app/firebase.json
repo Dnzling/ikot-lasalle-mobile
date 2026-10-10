@@ -1,0 +1,26 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "ikot-lasalle-ccfab",
+          "appId": "1:1002016926977:android:a9dc37107d13602467ff00",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "ikot-lasalle-ccfab",
+          "configurations": {
+            "android": "1:1002016926977:android:a9dc37107d13602467ff00",
+            "ios": "1:1002016926977:ios:79d91eac0f3b7abf67ff00",
+            "web": "1:1002016926977:web:088673e7d0ebc19867ff00"
+          }
+        }
+      }
+    }
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}

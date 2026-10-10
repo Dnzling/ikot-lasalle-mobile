@@ -1,0 +1,11 @@
+# Hardware sketches contain local Wi-Fi and Firebase device credentials.
+/hardwarecode.cpp
+/hardwarecode1.cpp
+
+# Local hardware setup notes may contain deployment credentials.
+/GPS_TRACKER_SETUP.md
+
+# Firebase CLI debug output.
+firebase-debug.log
+**/firebase-debug.log
+
