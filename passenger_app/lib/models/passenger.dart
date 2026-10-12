@@ -7,6 +7,8 @@ class Passenger {
     required this.phone,
     required this.balance,
     required this.mustChangePassword,
+    this.email = '',
+    this.emailVerified = false,
   });
 
   final String id;
@@ -16,6 +18,8 @@ class Passenger {
   final String phone;
   final double balance;
   final bool mustChangePassword;
+  final String email;
+  final bool emailVerified;
 
   String get fullName => '$firstName $lastName'.trim();
 
@@ -30,9 +34,15 @@ class Passenger {
         double.tryParse('${json['balance']}') ??
         0,
     mustChangePassword: json['mustChangePassword'] == true,
+    email: '${json['email'] ?? ''}'.trim(),
+    emailVerified: json['emailVerified'] == true,
   );
 
-  Passenger copyWith({bool? mustChangePassword}) => Passenger(
+  Passenger copyWith({
+    bool? mustChangePassword,
+    String? email,
+    bool? emailVerified,
+  }) => Passenger(
     id: id,
     firstName: firstName,
     lastName: lastName,
@@ -40,5 +50,7 @@ class Passenger {
     phone: phone,
     balance: balance,
     mustChangePassword: mustChangePassword ?? this.mustChangePassword,
+    email: email ?? this.email,
+    emailVerified: emailVerified ?? this.emailVerified,
   );
 }

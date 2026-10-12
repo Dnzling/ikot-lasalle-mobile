@@ -52,10 +52,72 @@ class ProfileScreen extends StatelessWidget {
             Icons.badge_outlined,
           ),
           const SizedBox(height: 16),
-          _detail(
-            'Phone number',
-            session.passenger.phone,
-            Icons.phone_outlined,
+          Card(
+            elevation: 0,
+            color: Colors.white,
+            child: ListTile(
+              leading: const Icon(
+                Icons.email_outlined,
+                color: Color(0xFF08783E),
+              ),
+              title: const Text(
+                'Email address',
+                style: TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    session.passenger.email.isEmpty
+                        ? 'Not added'
+                        : session.passenger.email,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (session.passenger.emailVerified)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 5),
+                      child: Icon(
+                        Icons.verified,
+                        size: 18,
+                        color: Color(0xFF168447),
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF0D5),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 3,
+                          ),
+                          child: Text(
+                            'Unverified',
+                            style: TextStyle(
+                              color: Color(0xFF946200),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              isThreeLine: true,
+              trailing: IconButton(
+                tooltip: 'Change email',
+                onPressed: () => _editEmail(context, session),
+                icon: const Icon(Icons.edit_outlined),
+              ),
+            ),
           ),
           const SizedBox(height: 28),
           FilledButton.icon(
@@ -98,6 +160,162 @@ class ProfileScreen extends StatelessWidget {
       ),
     ),
   );
+
+  Future<void> _editEmail(BuildContext context, AppSession session) async {
+    final controller = TextEditingController(text: session.passenger.email);
+    var sending = false;
+    var checking = false;
+    var linkSent = false;
+    String? errorMessage;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Change email address'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'We will send a verification link. Your profile email is updated only after you open the link and confirm here.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: controller,
+                  keyboardType: TextInputType.emailAddress,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'New email address',
+                    prefixIcon: Icon(Icons.email_outlined),
+                  ),
+                ),
+                if (linkSent) ...[
+                  const SizedBox(height: 12),
+                  const Text('Open the link in your inbox, then return here.'),
+                ],
+                if (errorMessage != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    errorMessage!,
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: sending || checking
+                  ? null
+                  : () => Navigator.pop(dialogContext),
+              child: const Text('Close'),
+            ),
+            if (linkSent)
+              OutlinedButton(
+                onPressed: checking || sending
+                    ? null
+                    : () async {
+                        setDialogState(() {
+                          checking = true;
+                          errorMessage = null;
+                        });
+                        try {
+                          final result = await const PassengerFirebaseService()
+                              .refreshPassengerEmail(uid: session.uid);
+                          if (!dialogContext.mounted) return;
+                          if (!result.verified ||
+                              result.email.toLowerCase() !=
+                                  controller.text.trim().toLowerCase()) {
+                            setDialogState(() {
+                              errorMessage =
+                                  'Email is not verified yet. Open the newest verification link and try again.';
+                            });
+                            return;
+                          }
+                          session.updatePassenger(
+                            session.passenger.copyWith(
+                              email: result.email,
+                              emailVerified: true,
+                            ),
+                          );
+                          Navigator.pop(dialogContext);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Verified email saved to your profile.',
+                              ),
+                            ),
+                          );
+                        } catch (error) {
+                          if (dialogContext.mounted) {
+                            setDialogState(() => errorMessage = '$error');
+                          }
+                        } finally {
+                          if (dialogContext.mounted) {
+                            setDialogState(() => checking = false);
+                          }
+                        }
+                      },
+                child: Text(checking ? 'Checking...' : 'I verified it'),
+              ),
+            FilledButton(
+              onPressed: sending || checking
+                  ? null
+                  : () async {
+                      setDialogState(() {
+                        sending = true;
+                        errorMessage = null;
+                      });
+                      try {
+                        final alreadyVerified =
+                            await const PassengerFirebaseService()
+                                .sendPassengerEmailVerification(
+                                  uid: session.uid,
+                                  email: controller.text,
+                                );
+                        if (!dialogContext.mounted) return;
+                        if (alreadyVerified) {
+                          session.updatePassenger(
+                            session.passenger.copyWith(
+                              email: controller.text.trim().toLowerCase(),
+                              emailVerified: true,
+                            ),
+                          );
+                          Navigator.pop(dialogContext);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Verified email saved to your profile.',
+                              ),
+                            ),
+                          );
+                          return;
+                        }
+                        setDialogState(() {
+                          linkSent = true;
+                          errorMessage = null;
+                        });
+                      } catch (error) {
+                        if (dialogContext.mounted) {
+                          setDialogState(() => errorMessage = '$error');
+                        }
+                      } finally {
+                        if (dialogContext.mounted) {
+                          setDialogState(() => sending = false);
+                        }
+                      }
+                    },
+              child: Text(sending ? 'Sending...' : 'Send verification link'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+  }
 
   Widget _detail(String label, String value, IconData icon) => Card(
     elevation: 0,

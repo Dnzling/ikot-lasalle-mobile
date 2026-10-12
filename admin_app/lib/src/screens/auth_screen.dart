@@ -14,21 +14,40 @@ class _AuthScreenState extends State<AuthScreen> {
   bool loading = false;
   final first = TextEditingController();
   final last = TextEditingController();
+  final idNumber = TextEditingController();
   final email = TextEditingController();
   final password = TextEditingController();
 
   Future<void> _submit() async {
+    if (idNumber.text.trim().isEmpty ||
+        password.text.isEmpty ||
+        (register &&
+            (first.text.trim().isEmpty ||
+                last.text.trim().isEmpty ||
+                email.text.trim().isEmpty))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            register
+                ? 'Enter your name, ID number, email, and password.'
+                : 'Enter your ID number and password.',
+          ),
+        ),
+      );
+      return;
+    }
     setState(() => loading = true);
     try {
       if (register) {
         await FirebaseService.instance.registerAdmin(
           first.text,
           last.text,
+          idNumber.text,
           email.text,
           password.text,
         );
       } else {
-        await FirebaseService.instance.signIn(email.text, password.text);
+        await FirebaseService.instance.signIn(idNumber.text, password.text);
       }
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -78,7 +97,7 @@ class _AuthScreenState extends State<AuthScreen> {
   String _message(Object error) {
     final text = error.toString();
     if (text.contains('invalid-credential')) {
-      return 'Incorrect email or password.';
+      return 'Incorrect ID number or password.';
     }
     if (text.contains('email-already-in-use')) {
       return 'That email already has an account.';
@@ -100,7 +119,7 @@ class _AuthScreenState extends State<AuthScreen> {
       'Firebase could not reach the network. Check your connection.',
     'invalid-api-key' =>
       'The Firebase API key is invalid or restricted for this app.',
-    'invalid-credential' => 'Incorrect email or password.',
+    'invalid-credential' => 'Incorrect ID number or password.',
     _ => 'Firebase Auth ${error.code}: ${error.message ?? 'request failed'}',
   };
 
@@ -221,10 +240,18 @@ class _AuthScreenState extends State<AuthScreen> {
                       const SizedBox(height: 16),
                     ],
                     _Field(
-                      label: 'ID Number',
-                      icon: Icons.person_outline,
-                      controller: email,
+                      label: 'ID number',
+                      icon: Icons.badge_outlined,
+                      controller: idNumber,
                     ),
+                    if (register) ...[
+                      const SizedBox(height: 16),
+                      _Field(
+                        label: 'Email address',
+                        icon: Icons.email_outlined,
+                        controller: email,
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     TextField(
                       controller: password,

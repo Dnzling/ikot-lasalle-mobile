@@ -7,6 +7,7 @@ class BusLocation {
     required this.status,
     required this.type,
     required this.speedKmh,
+    this.lastGpsAt,
   });
 
   final String id;
@@ -16,6 +17,15 @@ class BusLocation {
   final String status;
   final String type;
   final double speedKmh;
+  final DateTime? lastGpsAt;
+
+  bool get hasFreshGps {
+    final reportedAt = lastGpsAt;
+    if (reportedAt == null) return false;
+    final age = DateTime.now().difference(reportedAt);
+    return age >= const Duration(seconds: -5) &&
+        age <= const Duration(seconds: 30);
+  }
 
   factory BusLocation.fromJson(Map<String, dynamic> json) => BusLocation(
     id: '${json['id'] ?? ''}',
@@ -34,5 +44,6 @@ class BusLocation {
         (json['speedKmh'] as num?)?.toDouble() ??
         double.tryParse('${json['speedKmh']}') ??
         0,
+    lastGpsAt: DateTime.tryParse('${json['lastGpsAt'] ?? ''}'),
   );
 }

@@ -5,7 +5,6 @@ import 'admin_notifications.dart';
 import 'dashboard_page.dart';
 import 'drivers_page.dart';
 import 'fare_page.dart';
-import 'password_resets_page.dart';
 import 'routes_page.dart';
 import 'reports_page.dart';
 import 'settings_page.dart';
@@ -22,11 +21,6 @@ const _tabs = <({IconData icon, String title, Widget page})>[
   ),
   (icon: Icons.badge_outlined, title: 'Drivers', page: DriversPage()),
   (icon: Icons.people_outline, title: 'Users', page: UsersPage()),
-  (
-    icon: Icons.lock_reset_outlined,
-    title: 'Password resets',
-    page: PasswordResetsPage(),
-  ),
   (
     icon: Icons.account_balance_wallet_outlined,
     title: 'Top-ups',

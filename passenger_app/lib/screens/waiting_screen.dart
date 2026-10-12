@@ -51,6 +51,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   bool canceling = false;
   Timer? expiryTimer;
   Timer? etaTimer;
+  Timer? proximityTimer;
   late final Stream<List<BusLocation>> vehicleLocations;
   StreamSubscription<List<BusLocation>>? vehicleSubscription;
   BusLocation? assignedVehicle;
@@ -58,11 +59,14 @@ class _WaitingScreenState extends State<WaitingScreen> {
   DateTime? boardedAt;
   ({double latitude, double longitude, double radiusMeters})? destinationStop;
   ({double latitude, double longitude, double radiusMeters})? pickupStop;
-  bool geofenceArmed = false;
   int insideFixes = 0;
   bool completingArrival = false;
   bool arrived = false;
   bool stopsLoaded = false;
+  bool stopReached = false;
+  bool proximityCheckRunning = false;
+  bool overstayAlerted = false;
+  int nearVehicleFixes = 0;
 
   @override
   void initState() {
@@ -84,6 +88,12 @@ class _WaitingScreenState extends State<WaitingScreen> {
     etaTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted && boarded && !arrived) setState(() {});
     });
+    proximityTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted && assignedVehicle != null && !assignedVehicle!.hasFreshGps) {
+        setState(() => assignedVehicle = null);
+      }
+      _checkMissedStop();
+    });
     if (!boarded) {
       final elapsed = widget.createdAt == null
           ? Duration.zero
@@ -100,6 +110,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   void dispose() {
     expiryTimer?.cancel();
     etaTimer?.cancel();
+    proximityTimer?.cancel();
     vehicleSubscription?.cancel();
     super.dispose();
   }
@@ -134,7 +145,10 @@ class _WaitingScreenState extends State<WaitingScreen> {
     final id = assignedVehicleId;
     if (!mounted || id == null) return;
     final vehicle = vehicles.where((bus) => bus.id == id).firstOrNull;
-    if (vehicle == null) return;
+    if (vehicle == null || !vehicle.hasFreshGps) {
+      if (assignedVehicle != null) setState(() => assignedVehicle = null);
+      return;
+    }
     setState(() => assignedVehicle = vehicle);
     _checkArrivalGeofence();
   }
@@ -142,7 +156,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   double? get _distanceToDestination {
     final stop = destinationStop;
     final vehicle = assignedVehicle;
-    if (stop == null || vehicle == null) return null;
+    if (stop == null || vehicle == null || !vehicle.hasFreshGps) return null;
     return geo.Geolocator.distanceBetween(
       vehicle.latitude,
       vehicle.longitude,
@@ -181,10 +195,121 @@ class _WaitingScreenState extends State<WaitingScreen> {
     final distance = _distanceToDestination;
     if (stop == null || distance == null) return;
     if (distance > stop.radiusMeters) {
-      geofenceArmed = true;
       insideFixes = 0;
-    } else if (geofenceArmed && ++insideFixes >= 2) {
-      showArrival(automatic: true);
+    } else if (!stopReached && ++insideFixes >= 2) {
+      _notifyDestinationReached();
+    }
+  }
+
+  Future<void> _notifyDestinationReached() async {
+    if (!mounted || stopReached) return;
+    setState(() => stopReached = true);
+    try {
+      await HapticFeedback.vibrate();
+    } catch (_) {
+      // Some web browsers and devices do not provide vibration.
+    }
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Your stop is here'),
+        content: Text(
+          'The jeep has reached ${widget.destination}. Tap I have arrived only after you get off.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Still onboard'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('I have arrived'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      await showArrival();
+    }
+  }
+
+  Future<void> _checkMissedStop() async {
+    if (!mounted ||
+        !boarded ||
+        !stopReached ||
+        arrived ||
+        overstayAlerted ||
+        proximityCheckRunning) {
+      return;
+    }
+    final stop = destinationStop;
+    final vehicle = assignedVehicle;
+    if (stop == null ||
+        vehicle == null ||
+        geo.Geolocator.distanceBetween(
+              vehicle.latitude,
+              vehicle.longitude,
+              stop.latitude,
+              stop.longitude,
+            ) <=
+            stop.radiusMeters + 15) {
+      nearVehicleFixes = 0;
+      return;
+    }
+    proximityCheckRunning = true;
+    try {
+      final phone = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.high,
+        ),
+      ).timeout(const Duration(seconds: 4));
+      if (!mounted || arrived || phone.accuracy > 50) {
+        nearVehicleFixes = 0;
+        return;
+      }
+      final separation = geo.Geolocator.distanceBetween(
+        phone.latitude,
+        phone.longitude,
+        vehicle.latitude,
+        vehicle.longitude,
+      );
+      nearVehicleFixes = separation <= 75 ? nearVehicleFixes + 1 : 0;
+      if (nearVehicleFixes < 2) return;
+      overstayAlerted = true;
+      if (!mounted) return;
+      try {
+        await HapticFeedback.vibrate();
+      } catch (_) {
+        // Vibration is unavailable on some web browsers and devices.
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Check your ride status'),
+          content: const Text(
+            'The jeep has left your destination stop and your phone still appears nearby. If you got off, tap I have arrived. If you are still riding, please get off at a safe stop.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Still onboard'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                showArrival();
+              },
+              child: const Text('I have arrived'),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      nearVehicleFixes = 0;
+    } finally {
+      proximityCheckRunning = false;
     }
   }
 
@@ -272,7 +397,6 @@ class _WaitingScreenState extends State<WaitingScreen> {
           assignedVehicleId = payload['vehicleId'] as String;
           boardedAt = DateTime.now();
           assignedVehicle = null;
-          geofenceArmed = false;
           insideFixes = 0;
         });
       }
@@ -285,7 +409,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
     }
   }
 
-  Future<void> showArrival({bool automatic = false}) async {
+  Future<void> showArrival() async {
     if (completingArrival || arrived || !boarded) return;
     setState(() => completingArrival = true);
     try {
@@ -304,24 +428,13 @@ class _WaitingScreenState extends State<WaitingScreen> {
     }
     if (!mounted) return;
     setState(() => arrived = true);
-    if (automatic) {
-      try {
-        await HapticFeedback.vibrate();
-      } catch (_) {
-        // Haptics are optional on web and devices without a vibration motor.
-      }
-    }
     if (!mounted) return;
     showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: Text(automatic ? 'Destination reached' : 'Ride completed'),
-        content: Text(
-          automatic
-              ? 'Your vehicle entered the ${widget.destination} stop area. You have arrived.'
-              : 'You arrived at ${widget.destination}.',
-        ),
+        title: const Text('Ride completed'),
+        content: Text('You arrived at ${widget.destination}.'),
         actions: [
           FilledButton(
             onPressed: () =>
@@ -408,7 +521,9 @@ class _WaitingScreenState extends State<WaitingScreen> {
                   destination: widget.destination,
                   destinationLatitude: destinationStop?.latitude,
                   destinationLongitude: destinationStop?.longitude,
-                  busLocations: snapshot.data ?? const [],
+                  busLocations:
+                      snapshot.data?.where((bus) => bus.hasFreshGps).toList() ??
+                      const [],
                   onboardVehicleId: boarded ? assignedVehicleId : null,
                 ),
                 if (snapshot.hasError)
@@ -444,7 +559,9 @@ class _WaitingScreenState extends State<WaitingScreen> {
           ),
         ],
         const SizedBox(height: 20),
-        if (!boarded || (_etaMinutes != null && _etaMinutes! <= 2))
+        if (!boarded ||
+            stopReached ||
+            (_etaMinutes != null && _etaMinutes! <= 2))
           SizedBox(
             height: 54,
             child: FilledButton.icon(

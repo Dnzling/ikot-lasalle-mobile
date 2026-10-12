@@ -13,16 +13,14 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   final _formKey = GlobalKey<FormState>();
   final _first = TextEditingController();
   final _last = TextEditingController();
-  final _id = TextEditingController();
-  final _contact = TextEditingController();
+  final _email = TextEditingController();
   bool _submitting = false;
 
   @override
   void dispose() {
     _first.dispose();
     _last.dispose();
-    _id.dispose();
-    _contact.dispose();
+    _email.dispose();
     super.dispose();
   }
 
@@ -30,20 +28,19 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     if (_submitting || !_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
     try {
-      await const PassengerFirebaseService().requestPasswordReset(
+      await const PassengerFirebaseService().sendPasswordResetLink(
         firstName: _first.text,
         lastName: _last.text,
-        idNumber: _id.text,
-        contactNumber: _contact.text,
+        email: _email.text,
       );
       if (!mounted) return;
       await showDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (context) => AlertDialog(
-          title: const Text('Request submitted'),
+          title: const Text('Check your email'),
           content: const Text(
-            'Visit the admin office with your ID. Staff will verify your details and provide a temporary password. You must change it when you sign in.',
+            'If the passenger name and verified email match, Firebase has sent a password-reset link. Open it to choose a new password, then return here and sign in.',
           ),
           actions: [
             FilledButton(
@@ -57,7 +54,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not submit request: $error')),
+          SnackBar(content: Text('Could not send reset link: $error')),
         );
       }
     } finally {
@@ -75,27 +72,26 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           padding: const EdgeInsets.all(24),
           children: [
             const Text(
-              'Request a password reset',
+              'Reset your password',
               style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
             ),
             const SizedBox(height: 8),
             const Text(
-              'Enter your registered details. Admin staff will verify them before resetting your password.',
+              'Enter the first name, last name, and email you verified in your passenger account. Firebase will email a secure reset link.',
             ),
             const SizedBox(height: 24),
             _field(_first, 'First name'),
             _field(_last, 'Last name'),
-            _field(_id, 'ID number'),
             _field(
-              _contact,
-              'Contact number',
-              keyboardType: TextInputType.phone,
+              _email,
+              'Verified email address',
+              keyboardType: TextInputType.emailAddress,
             ),
             const SizedBox(height: 12),
             FilledButton(
               onPressed: _submitting ? null : _submit,
               child: Text(
-                _submitting ? 'Submitting...' : 'Submit reset request',
+                _submitting ? 'Sending link...' : 'Send password reset link',
               ),
             ),
           ],
@@ -116,8 +112,15 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       textCapitalization: keyboardType == null
           ? TextCapitalization.words
           : TextCapitalization.none,
-      validator: (value) =>
-          value == null || value.trim().isEmpty ? '$label is required.' : null,
+      autocorrect: keyboardType == TextInputType.emailAddress ? false : true,
+      validator: (value) {
+        if (value == null || value.trim().isEmpty) return '$label is required.';
+        if (keyboardType == TextInputType.emailAddress &&
+            !RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(value.trim())) {
+          return 'Enter a valid email address.';
+        }
+        return null;
+      },
       decoration: InputDecoration(labelText: label),
     ),
   );

@@ -1,7 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../config/mapbox_config.dart';
+import 'vehicle_marker_art.dart';
 
 typedef MapLocation = ({double latitude, double longitude});
 
@@ -13,6 +16,8 @@ class RealMap extends StatefulWidget {
     this.interactivePin = false,
     this.label = 'Location',
     this.showMarker = true,
+    this.vehicleType,
+    this.plateNumber,
     this.radiusMeters,
     this.onLocationChanged,
   });
@@ -22,6 +27,8 @@ class RealMap extends StatefulWidget {
   final bool interactivePin;
   final String label;
   final bool showMarker;
+  final String? vehicleType;
+  final String? plateNumber;
   final double? radiusMeters;
   final ValueChanged<MapLocation>? onLocationChanged;
 
@@ -30,6 +37,12 @@ class RealMap extends StatefulWidget {
 }
 
 class _RealMapState extends State<RealMap> {
+  static final Future<Uint8List> jeepMarker = VehicleMarkerArt.make(
+    electric: false,
+  );
+  static final Future<Uint8List> eJeepMarker = VehicleMarkerArt.make(
+    electric: true,
+  );
   // DLSU-D campus center, matching the passenger application.
   static const campus = LatLng(14.3225, 120.9630);
   final controller = MapController();
@@ -109,8 +122,10 @@ class _RealMapState extends State<RealMap> {
                       Marker(
                         point: marker,
                         width: 180,
-                        height: 78,
-                        alignment: Alignment.topCenter,
+                        height: widget.vehicleType == null ? 78 : 112,
+                        alignment: widget.vehicleType == null
+                            ? Alignment.topCenter
+                            : Alignment.bottomCenter,
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -125,7 +140,14 @@ class _RealMapState extends State<RealMap> {
                                   borderRadius: BorderRadius.circular(7),
                                 ),
                                 child: Text(
-                                  widget.label,
+                                  widget.vehicleType == null
+                                      ? widget.label
+                                      : (widget.plateNumber
+                                                    ?.trim()
+                                                    .isNotEmpty ==
+                                                true
+                                            ? widget.plateNumber!.trim()
+                                            : 'Plate number unavailable'),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
@@ -136,11 +158,29 @@ class _RealMapState extends State<RealMap> {
                                 ),
                               ),
                             ),
-                            const Icon(
-                              Icons.location_on,
-                              color: Color(0xFF08783E),
-                              size: 34,
-                            ),
+                            if (widget.vehicleType == null)
+                              const Icon(
+                                Icons.location_on,
+                                color: Color(0xFF08783E),
+                                size: 34,
+                              )
+                            else
+                              FutureBuilder<Uint8List>(
+                                future:
+                                    widget.vehicleType!.toLowerCase().contains(
+                                      'e-jeep',
+                                    )
+                                    ? eJeepMarker
+                                    : jeepMarker,
+                                builder: (context, snapshot) => snapshot.hasData
+                                    ? Image.memory(
+                                        snapshot.data!,
+                                        width: 90,
+                                        height: 68,
+                                        fit: BoxFit.contain,
+                                      )
+                                    : const SizedBox(height: 68),
+                              ),
                           ],
                         ),
                       ),

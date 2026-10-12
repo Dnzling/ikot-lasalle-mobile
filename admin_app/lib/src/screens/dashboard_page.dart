@@ -13,6 +13,8 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage> {
   final subscriptions = <StreamSubscription>[];
+  Timer? vehiclePresenceTimer;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> vehicleDocs = [];
   int activeUsers = 0, activeVehicles = 0, totalVehicles = 0;
   double todayIncome = 0, monthIncome = 0;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> transactions = [];
@@ -21,6 +23,9 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
+    vehiclePresenceTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) setState(_refreshVehicleCounts);
+    });
     subscriptions.add(
       FirebaseService.instance.watch('users').listen((s) {
         if (mounted) {
@@ -36,17 +41,8 @@ class _DashboardPageState extends State<DashboardPage> {
       FirebaseService.instance.watch('vehicles').listen((s) {
         if (mounted) {
           setState(() {
-            final operatingVehicles = s.docs
-                .where((d) => d.data()['archived'] != true)
-                .toList();
-            totalVehicles = operatingVehicles.length;
-            activeVehicles = operatingVehicles
-                .where(
-                  (d) =>
-                      d.data()['status'] == 'active' ||
-                      d.data()['status'] == 'onRoute',
-                )
-                .length;
+            vehicleDocs = s.docs;
+            _refreshVehicleCounts();
           });
         }
       }),
@@ -82,10 +78,24 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   void dispose() {
+    vehiclePresenceTimer?.cancel();
     for (final item in subscriptions) {
       item.cancel();
     }
     super.dispose();
+  }
+
+  void _refreshVehicleCounts() {
+    final operating = vehicleDocs.where((d) => d.data()['archived'] != true);
+    totalVehicles = operating.length;
+    activeVehicles = operating.where((d) {
+      final data = d.data();
+      return vehicleGpsIsFresh(data) &&
+          const {
+            'active',
+            'onroute',
+          }.contains('${data['status']}'.toLowerCase());
+    }).length;
   }
 
   @override
@@ -126,7 +136,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 icon: Icons.people_outline,
                 label: 'ACTIVE USERS',
                 value: '$activeUsers',
-                note: 'Enabled Firebase profiles',
+                note: 'Enabled profiles',
                 color: Color(0xFFF2994A),
               ),
             ),
@@ -529,10 +539,7 @@ class _Transaction extends StatelessWidget {
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
         ),
-        Expanded(
-          flex: 2,
-          child: Text(data.$2),
-        ),
+        Expanded(flex: 2, child: Text(data.$2)),
         Expanded(flex: 2, child: Text(data.$3)),
         Expanded(child: Text(data.$4)),
         Expanded(

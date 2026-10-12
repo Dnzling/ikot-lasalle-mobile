@@ -4,6 +4,20 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart' as core;
 
+const vehicleGpsStaleAfter = Duration(seconds: 30);
+
+bool vehicleGpsIsFresh(Map<String, dynamic> vehicle, {DateTime? now}) {
+  final lastGpsAt = vehicle['lastGpsAt'];
+  if (lastGpsAt is! Timestamp) return false;
+  final age = (now ?? DateTime.now()).difference(lastGpsAt.toDate());
+  return age >= const Duration(seconds: -5) && age <= vehicleGpsStaleAfter;
+}
+
+String vehicleDisplayStatus(Map<String, dynamic> vehicle) {
+  if (!vehicleGpsIsFresh(vehicle)) return 'OFFLINE';
+  return '${vehicle['status'] ?? 'idle'}'.toUpperCase();
+}
+
 class AdminProfileWriteException implements Exception {
   const AdminProfileWriteException(this.code, this.message);
   final String code;
@@ -17,14 +31,39 @@ class FirebaseService {
   final db = FirebaseFirestore.instance;
 
   Stream<User?> get authChanges => auth.authStateChanges();
-  Future<void> signIn(String email, String password) =>
-      auth.signInWithEmailAndPassword(email: email.trim(), password: password);
+  Future<void> signIn(String idNumber, String password) async {
+    final cleanId = idNumber.trim();
+    final matches = await db
+        .collection('users')
+        .where('idNumber', isEqualTo: cleanId)
+        .get();
+    final admin = matches.docs.where((doc) {
+      final data = doc.data();
+      return '${data['userType'] ?? ''}'.toLowerCase() == 'admin' &&
+          '${data['idNumber'] ?? ''}'.trim() == cleanId;
+    }).firstOrNull;
+    final email = '${admin?.data()['email'] ?? ''}'.trim();
+    if (email.isEmpty) {
+      throw FirebaseAuthException(
+        code: 'invalid-credential',
+        message: 'No admin account is registered with that ID number.',
+      );
+    }
+    await auth.signInWithEmailAndPassword(email: email, password: password);
+  }
+
   Future<void> registerAdmin(
     String first,
     String last,
+    String idNumber,
     String email,
     String password,
   ) async {
+    final cleanId = idNumber.trim();
+    if (cleanId.isEmpty) {
+      throw ArgumentError('Admin ID number is required.');
+    }
+    await _ensureAdminIdAvailable(cleanId);
     final credential = await auth.createUserWithEmailAndPassword(
       email: email.trim(),
       password: password,
@@ -34,6 +73,7 @@ class FirebaseService {
       await db.collection('users').doc(credential.user!.uid).set({
         'firstName': first.trim(),
         'lastName': last.trim(),
+        'idNumber': cleanId,
         'email': email.trim(),
         'userType': 'Admin',
         'createdAt': FieldValue.serverTimestamp(),
@@ -47,8 +87,17 @@ class FirebaseService {
   }
 
   Future<void> createAdditionalAdmin(
-    String first, String last, String email, String password,
+    String first,
+    String last,
+    String idNumber,
+    String email,
+    String password,
   ) async {
+    final cleanId = idNumber.trim();
+    if (cleanId.isEmpty) {
+      throw ArgumentError('Admin ID number is required.');
+    }
+    await _ensureAdminIdAvailable(cleanId);
     final secondary = await core.Firebase.initializeApp(
       name: 'admin-creation-${DateTime.now().microsecondsSinceEpoch}',
       options: core.Firebase.app().options,
@@ -56,12 +105,17 @@ class FirebaseService {
     try {
       final secondaryAuth = FirebaseAuth.instanceFor(app: secondary);
       final credential = await secondaryAuth.createUserWithEmailAndPassword(
-        email: email.trim(), password: password,
+        email: email.trim(),
+        password: password,
       );
       await credential.user?.updateDisplayName('$first $last'.trim());
       await db.collection('users').doc(credential.user!.uid).set({
-        'firstName': first.trim(), 'lastName': last.trim(),
-        'email': email.trim(), 'userType': 'Admin', 'active': true,
+        'firstName': first.trim(),
+        'lastName': last.trim(),
+        'idNumber': cleanId,
+        'email': email.trim(),
+        'userType': 'Admin',
+        'active': true,
         'createdAt': FieldValue.serverTimestamp(),
       });
       await secondaryAuth.signOut();
@@ -71,6 +125,20 @@ class FirebaseService {
   }
 
   Future<void> signOut() => auth.signOut();
+
+  Future<void> _ensureAdminIdAvailable(String idNumber) async {
+    final matches = await db
+        .collection('users')
+        .where('idNumber', isEqualTo: idNumber)
+        .get();
+    final alreadyAdmin = matches.docs.any(
+      (doc) => '${doc.data()['userType'] ?? ''}'.toLowerCase() == 'admin',
+    );
+    if (alreadyAdmin) {
+      throw ArgumentError('That admin ID number is already registered.');
+    }
+  }
+
   Future<void> sendPasswordReset(String email) =>
       auth.sendPasswordResetEmail(email: email.trim());
 
@@ -95,21 +163,18 @@ class FirebaseService {
   Future<void> addVehicle({
     required String name,
     required int capacity,
-    required double dailyQuota,
-    required double driverSalary,
     required String plateNumber,
     required String type,
   }) => db.collection('vehicles').add({
     'name': name.trim(),
     'passengerCapacity': capacity,
-    'dailyQuota': dailyQuota,
     'plateNumber': plateNumber.trim(),
     'type': type,
     'onBoardPassengers': 0,
     'outBoardPassengers': 0,
+    'expectedOutboardByStop': <String, int>{},
     'tripPassengerCount': 0,
     'tripIncome': 0.0,
-    'driverSalary': driverSalary,
     'createdAt': FieldValue.serverTimestamp(),
   });
 
@@ -117,19 +182,57 @@ class FirebaseService {
     String vehicleId, {
     required String name,
     required int capacity,
-    required double dailyQuota,
-    required double driverSalary,
     required String plateNumber,
     required String type,
   }) => db.collection('vehicles').doc(vehicleId).update({
     'name': name.trim(),
     'passengerCapacity': capacity,
-    'dailyQuota': dailyQuota,
-    'driverSalary': driverSalary,
     'plateNumber': plateNumber.trim(),
     'type': type,
     'updatedAt': FieldValue.serverTimestamp(),
   });
+
+  /// Move legacy vehicle compensation to its assigned driver once.
+  Future<void> migrateDriverCompensationFromVehicles() async {
+    final vehicles = await db.collection('vehicles').get();
+    for (final vehicleDoc in vehicles.docs) {
+      final data = vehicleDoc.data();
+      final driverId = '${data['driverId'] ?? ''}'.trim();
+      if (driverId.isEmpty ||
+          (!data.containsKey('dailyQuota') &&
+              !data.containsKey('driverSalary'))) {
+        continue;
+      }
+      final driverRef = db.collection('drivers').doc(driverId);
+      await db.runTransaction((transaction) async {
+        final vehicle = await transaction.get(vehicleDoc.reference);
+        final driver = await transaction.get(driverRef);
+        if (!vehicle.exists ||
+            !driver.exists ||
+            vehicle.data()?['driverId'] != driverId)
+          return;
+        final old = vehicle.data()!;
+        final current = driver.data()!;
+        final driverChanges = <String, dynamic>{};
+        if (!current.containsKey('dailySalary') && old['driverSalary'] is num) {
+          driverChanges['dailySalary'] = old['driverSalary'];
+        }
+        if (!current.containsKey('dailyQuota') && old['dailyQuota'] is num) {
+          driverChanges['dailyQuota'] = old['dailyQuota'];
+        }
+        if (driverChanges.isNotEmpty)
+          transaction.update(driverRef, driverChanges);
+        if (old.containsKey('driverSalary') || old.containsKey('dailyQuota')) {
+          transaction.update(vehicleDoc.reference, {
+            if (old.containsKey('driverSalary'))
+              'driverSalary': FieldValue.delete(),
+            if (old.containsKey('dailyQuota'))
+              'dailyQuota': FieldValue.delete(),
+          });
+        }
+      });
+    }
+  }
 
   Future<void> archiveVehicle(String vehicleId) =>
       db.collection('vehicles').doc(vehicleId).update({
@@ -267,17 +370,25 @@ class FirebaseService {
       final driver = await transaction.get(driverRef);
       if (!driver.exists) throw StateError('Driver not found.');
       final vehicleId = driver.data()?['vehicleId'] as String?;
-      final vehicleRef = vehicleId == null ? null : db.collection('vehicles').doc(vehicleId);
-      final vehicle = vehicleRef == null ? null : await transaction.get(vehicleRef);
+      final vehicleRef = vehicleId == null
+          ? null
+          : db.collection('vehicles').doc(vehicleId);
+      final vehicle = vehicleRef == null
+          ? null
+          : await transaction.get(vehicleRef);
       if (vehicleRef != null && vehicle?.data()?['driverId'] == driverId) {
         transaction.update(vehicleRef, {
-          'driverId': FieldValue.delete(), 'driverName': FieldValue.delete(),
+          'driverId': FieldValue.delete(),
+          'driverName': FieldValue.delete(),
           'updatedAt': FieldValue.serverTimestamp(),
         });
       }
       transaction.update(driverRef, {
-        'archived': true, 'active': false, 'vehicleId': null,
-        'vehicleName': 'Unassigned', 'archivedAt': FieldValue.serverTimestamp(),
+        'archived': true,
+        'active': false,
+        'vehicleId': null,
+        'vehicleName': 'Unassigned',
+        'archivedAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
     });
@@ -326,25 +437,37 @@ class FirebaseService {
   }) async {
     final requestRef = db.collection('topUpRequests').doc(requestId);
     if (approve) {
-      final current = await requestRef.get(const GetOptions(source: Source.server));
+      final current = await requestRef.get(
+        const GetOptions(source: Source.server),
+      );
       final reference = '${current.data()?['referenceNumber'] ?? ''}'.trim();
       if (reference.isEmpty || !RegExp(r'^\d{13}$').hasMatch(reference)) {
-        throw StateError('This request has no valid 13-digit reference number.');
+        throw StateError(
+          'This request has no valid 13-digit reference number.',
+        );
       }
-      final matchingRequests = await db.collection('topUpRequests')
+      final matchingRequests = await db
+          .collection('topUpRequests')
           .where('referenceNumber', isEqualTo: reference)
           .get(const GetOptions(source: Source.server));
-      if (matchingRequests.docs.any((doc) =>
-          doc.id != requestId &&
-          '${doc.data()['status'] ?? ''}'.trim().toLowerCase() == 'approved')) {
-        throw StateError('This GCash reference was already approved for another top-up.');
+      if (matchingRequests.docs.any(
+        (doc) =>
+            doc.id != requestId &&
+            '${doc.data()['status'] ?? ''}'.trim().toLowerCase() == 'approved',
+      )) {
+        throw StateError(
+          'This GCash reference was already approved for another top-up.',
+        );
       }
-      final matchingTransactions = await db.collection('transactions')
+      final matchingTransactions = await db
+          .collection('transactions')
           .where('referenceNumber', isEqualTo: reference)
           .get(const GetOptions(source: Source.server));
-      if (matchingTransactions.docs.any((doc) =>
-          doc.data()['topUpRequestId'] != requestId &&
-          '${doc.data()['type'] ?? ''}'.toLowerCase() == 'topup')) {
+      if (matchingTransactions.docs.any(
+        (doc) =>
+            doc.data()['topUpRequestId'] != requestId &&
+            '${doc.data()['type'] ?? ''}'.toLowerCase() == 'topup',
+      )) {
         throw StateError('This GCash reference was already credited.');
       }
     }
@@ -366,7 +489,9 @@ class FirebaseService {
       }
 
       DocumentSnapshot<Map<String, dynamic>>? userSnapshot;
-      final transactionRef = db.collection('transactions').doc('topUp_$reference');
+      final transactionRef = db
+          .collection('transactions')
+          .doc('topUp_$reference');
       if (approve) {
         userSnapshot = await transaction.get(
           db.collection('users').doc(userId),
@@ -428,11 +553,8 @@ class FirebaseService {
     final userType = '${data['userType'] ?? ''}'.trim();
     if (idNumber.isEmpty ||
         lastName.isEmpty ||
-        '${data['firstName'] ?? ''}'.trim().isEmpty ||
-        !RegExp(r'^\d{11}$').hasMatch('${data['contactNumber'] ?? ''}'.trim())) {
-      throw ArgumentError(
-        'First name, last name, ID and contact number are required.',
-      );
+        '${data['firstName'] ?? ''}'.trim().isEmpty) {
+      throw ArgumentError('First name, last name, and ID number are required.');
     }
     if (!const {'Student', 'Teacher', 'Visitor', 'Staff'}.contains(userType)) {
       throw ArgumentError('Choose a valid passenger type.');

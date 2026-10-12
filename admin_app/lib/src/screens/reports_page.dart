@@ -155,185 +155,210 @@ class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
     stream: FirebaseService.instance.watch('trips'),
     builder: (context, tripsSnapshot) => StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: FirebaseService.instance.watch('vehicles'),
-      builder: (context, vehiclesSnapshot) {
-        final vehicles = {
-          for (final doc
-              in vehiclesSnapshot.data?.docs ??
-                  <QueryDocumentSnapshot<Map<String, dynamic>>>[])
-            doc.id: doc.data(),
-        };
-        final totals =
-            <
-              String,
-              ({
-                String date,
-                String vehicle,
-                int rides,
-                int passengers,
-                double revenue,
-                double salary,
-              })
-            >{};
-        for (final doc
-            in tripsSnapshot.data?.docs ??
-                <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
-          final trip = doc.data();
-          final vehicleId = '${trip['vehicleId'] ?? ''}';
-          if (vehicleId.isEmpty) continue;
-          final time = trip['boardedAt'];
-          if (time is! Timestamp) continue;
-          final date = time.toDate();
-          if (range != null &&
-              (date.isBefore(
-                    DateTime(
-                      range!.start.year,
-                      range!.start.month,
-                      range!.start.day,
-                    ),
-                  ) ||
-                  date.isAfter(
-                    DateTime(
-                      range!.end.year,
-                      range!.end.month,
-                      range!.end.day,
-                      23,
-                      59,
-                      59,
-                    ),
-                  ))) {
-            continue;
-          }
-          final day =
-              '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-          final key = '$day|$vehicleId';
-          final previous = totals[key];
-          final vehicle = vehicles[vehicleId];
-          totals[key] = (
-            date: day,
-            vehicle: '${trip['vehicleName'] ?? vehicle?['name'] ?? vehicleId}',
-            rides: (previous?.rides ?? 0) + 1,
-            passengers:
-                (previous?.passengers ?? 0) +
-                ((trip['passengerCount'] as num?)?.toInt() ?? 1),
-            revenue:
-                (previous?.revenue ?? 0) +
-                ((trip['fare'] as num?)?.toDouble() ?? 0),
-            salary: (vehicle?['driverSalary'] as num?)?.toDouble() ?? 0,
-          );
-        }
-        final rows =
-            totals.values
-                .map(
-                  (v) => [
-                    v.date,
-                    v.vehicle,
-                    '${v.rides}',
-                    '${v.passengers}',
-                    v.revenue.toStringAsFixed(2),
-                    v.salary.toStringAsFixed(2),
-                    (v.revenue - v.salary).toStringAsFixed(2),
-                  ],
-                )
-                .toList()
-              ..sort((a, b) => b[0].compareTo(a[0]));
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Vehicle daily performance',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
-                ),
-                const Text(
-                  'Recorded passenger rides and fare revenue per vehicle/day. Full vehicle loops are not tracked yet.',
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    OutlinedButton(
-                      onPressed: () => setState(
-                        () => range = DateTimeRange(
-                          start: DateTime.now(),
-                          end: DateTime.now(),
-                        ),
-                      ),
-                      child: const Text('Today'),
-                    ),
-                    OutlinedButton(
-                      onPressed: () => setState(
-                        () => range = DateTimeRange(
-                          start: DateTime.now().subtract(
-                            const Duration(days: 6),
+      builder: (context, vehiclesSnapshot) =>
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: FirebaseService.instance.watch('drivers'),
+            builder: (context, driversSnapshot) {
+              final vehicles = {
+                for (final doc
+                    in vehiclesSnapshot.data?.docs ??
+                        <QueryDocumentSnapshot<Map<String, dynamic>>>[])
+                  doc.id: doc.data(),
+              };
+              final drivers = {
+                for (final doc
+                    in driversSnapshot.data?.docs ??
+                        <QueryDocumentSnapshot<Map<String, dynamic>>>[])
+                  doc.id: doc.data(),
+              };
+              final totals =
+                  <
+                    String,
+                    ({
+                      String date,
+                      String vehicle,
+                      int rides,
+                      int passengers,
+                      double revenue,
+                      double salary,
+                    })
+                  >{};
+              for (final doc
+                  in tripsSnapshot.data?.docs ??
+                      <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+                final trip = doc.data();
+                final vehicleId = '${trip['vehicleId'] ?? ''}';
+                if (vehicleId.isEmpty) continue;
+                final time = trip['boardedAt'];
+                if (time is! Timestamp) continue;
+                final date = time.toDate();
+                if (range != null &&
+                    (date.isBefore(
+                          DateTime(
+                            range!.start.year,
+                            range!.start.month,
+                            range!.start.day,
                           ),
-                          end: DateTime.now(),
+                        ) ||
+                        date.isAfter(
+                          DateTime(
+                            range!.end.year,
+                            range!.end.month,
+                            range!.end.day,
+                            23,
+                            59,
+                            59,
+                          ),
+                        ))) {
+                  continue;
+                }
+                final day =
+                    '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+                final key = '$day|$vehicleId';
+                final previous = totals[key];
+                final vehicle = vehicles[vehicleId];
+                totals[key] = (
+                  date: day,
+                  vehicle:
+                      '${trip['vehicleName'] ?? vehicle?['name'] ?? vehicleId}',
+                  rides: (previous?.rides ?? 0) + 1,
+                  passengers:
+                      (previous?.passengers ?? 0) +
+                      ((trip['passengerCount'] as num?)?.toInt() ?? 1),
+                  revenue:
+                      (previous?.revenue ?? 0) +
+                      ((trip['fare'] as num?)?.toDouble() ?? 0),
+                  salary:
+                      (drivers['${vehicle?['driverId'] ?? ''}']?['dailySalary']
+                              as num?)
+                          ?.toDouble() ??
+                      0,
+                );
+              }
+              final rows =
+                  totals.values
+                      .map(
+                        (v) => [
+                          v.date,
+                          v.vehicle,
+                          '${v.rides}',
+                          '${v.passengers}',
+                          v.revenue.toStringAsFixed(2),
+                          v.salary.toStringAsFixed(2),
+                          (v.revenue - v.salary).toStringAsFixed(2),
+                        ],
+                      )
+                      .toList()
+                    ..sort((a, b) => b[0].compareTo(a[0]));
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Vehicle daily performance',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
-                      child: const Text('Last 7 days'),
-                    ),
-                    OutlinedButton(
-                      onPressed: () async {
-                        final chosen = await showDateRangePicker(
-                          context: context,
-                          firstDate: DateTime(2020),
-                          lastDate: DateTime(DateTime.now().year + 1),
-                        );
-                        if (chosen != null) setState(() => range = chosen);
-                      },
-                      child: Text(
-                        range == null
-                            ? 'Custom dates'
-                            : '${_shortDate(range!.start)} - ${_shortDate(range!.end)}',
+                      const Text(
+                        'Recorded passenger rides and fare revenue per vehicle/day. Full vehicle loops are not tracked yet.',
                       ),
-                    ),
-                    if (range != null)
-                      TextButton(
-                        onPressed: () => setState(() => range = null),
-                        child: const Text('Clear'),
-                      ),
-                    OutlinedButton(
-                      onPressed: rows.isEmpty
-                          ? null
-                          : () => export(rows, false),
-                      child: const Text('Excel'),
-                    ),
-                    FilledButton(
-                      onPressed: rows.isEmpty ? null : () => export(rows, true),
-                      child: const Text('PDF'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                if (tripsSnapshot.hasError || vehiclesSnapshot.hasError)
-                  Text(
-                    'Could not load performance: ${tripsSnapshot.error ?? vehiclesSnapshot.error}',
-                  )
-                else if (rows.isEmpty)
-                  const Text('No boarded rides for the selected dates.')
-                else
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: DataTable(
-                      columns: headers
-                          .map((h) => DataColumn(label: Text(h)))
-                          .toList(),
-                      rows: rows
-                          .map(
-                            (r) => DataRow(
-                              cells: r.map((v) => DataCell(Text(v))).toList(),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton(
+                            onPressed: () => setState(
+                              () => range = DateTimeRange(
+                                start: DateTime.now(),
+                                end: DateTime.now(),
+                              ),
                             ),
-                          )
-                          .toList(),
-                    ),
+                            child: const Text('Today'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () => setState(
+                              () => range = DateTimeRange(
+                                start: DateTime.now().subtract(
+                                  const Duration(days: 6),
+                                ),
+                                end: DateTime.now(),
+                              ),
+                            ),
+                            child: const Text('Last 7 days'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () async {
+                              final chosen = await showDateRangePicker(
+                                context: context,
+                                firstDate: DateTime(2020),
+                                lastDate: DateTime(DateTime.now().year + 1),
+                              );
+                              if (chosen != null)
+                                setState(() => range = chosen);
+                            },
+                            child: Text(
+                              range == null
+                                  ? 'Custom dates'
+                                  : '${_shortDate(range!.start)} - ${_shortDate(range!.end)}',
+                            ),
+                          ),
+                          if (range != null)
+                            TextButton(
+                              onPressed: () => setState(() => range = null),
+                              child: const Text('Clear'),
+                            ),
+                          OutlinedButton(
+                            onPressed: rows.isEmpty
+                                ? null
+                                : () => export(rows, false),
+                            child: const Text('Excel'),
+                          ),
+                          FilledButton(
+                            onPressed: rows.isEmpty
+                                ? null
+                                : () => export(rows, true),
+                            child: const Text('PDF'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (tripsSnapshot.hasError ||
+                          vehiclesSnapshot.hasError ||
+                          driversSnapshot.hasError)
+                        Text(
+                          'Could not load performance: ${tripsSnapshot.error ?? vehiclesSnapshot.error ?? driversSnapshot.error}',
+                        )
+                      else if (rows.isEmpty)
+                        const Text('No boarded rides for the selected dates.')
+                      else
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: DataTable(
+                            columns: headers
+                                .map((h) => DataColumn(label: Text(h)))
+                                .toList(),
+                            rows: rows
+                                .map(
+                                  (r) => DataRow(
+                                    cells: r
+                                        .map((v) => DataCell(Text(v)))
+                                        .toList(),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
+                ),
+              );
+            },
           ),
-        );
-      },
     ),
   );
 }
@@ -633,5 +658,9 @@ String _dateText(Object? value) {
 }
 
 String _transactionDate(Object? value) => transactionDateTime(
-  value is Timestamp ? value.toDate() : value is DateTime ? value : null,
+  value is Timestamp
+      ? value.toDate()
+      : value is DateTime
+      ? value
+      : null,
 );

@@ -289,9 +289,17 @@ class AdminNotificationCenter {
 
   static Future<List<AdminAlert>> load() async {
     final reads = await Future.wait([
-      _read('topUpRequests'), _read('passwordResetRequests'), _read('users'),
-      _read('vehicles'), _read('fuelingRequests'), _read('fueling'),
-      _read('exportLogs'), _read('quotaFulfilments'), _read('quotaRequests'),
+      _read('topUpRequests'),
+      _read('passwordResetRequests'),
+      _read('users'),
+      _read('vehicles'),
+      _read('fuelingRequests'),
+      _read('fueling'),
+      _read('exportLogs'),
+      _read('quotaFulfilments'),
+      _read('quotaRequests'),
+      _read('drivers'),
+      _read('trips'),
     ]);
     final topUps = reads[0];
     final passwordResets = reads[1];
@@ -300,6 +308,8 @@ class AdminNotificationCenter {
     final fueling = [...reads[4], ...reads[5]];
     final exports = reads[6];
     final quotas = [...reads[7], ...reads[8]];
+    final drivers = reads[9];
+    final trips = reads[10];
     final alerts = <AdminAlert>[];
 
     for (final doc in topUps) {
@@ -315,7 +325,7 @@ class AdminNotificationCenter {
           icon: Icons.account_balance_wallet_outlined,
           color: const Color(0xFF08783E),
           date: _date(data['submittedAt']),
-          destination: 5,
+          destination: 4,
         ),
       );
     }
@@ -333,7 +343,7 @@ class AdminNotificationCenter {
           icon: Icons.lock_reset_outlined,
           color: const Color(0xFF9A6100),
           date: _date(data['createdAt']),
-          destination: 4,
+          destination: 3,
         ),
       );
     }
@@ -430,27 +440,48 @@ class AdminNotificationCenter {
       );
     }
 
-    // Vehicle daily earnings are the live source for quota fulfilment. Some
-    // deployments also store explicit quota request records, included above.
-    for (final doc in vehicles) {
+    // Quotas belong to drivers. Count only rides boarded today; the vehicle's
+    // tripIncome field is cumulative and must not be used as a daily total.
+    final now = DateTime.now();
+    final todayRevenueByDriver = <String, double>{};
+    final legacyRevenueByVehicle = <String, double>{};
+    for (final trip in trips) {
+      final data = trip.data();
+      final boardedAt = _date(data['boardedAt']);
+      final vehicleId = '${data['vehicleId'] ?? ''}';
+      if (boardedAt == null ||
+          boardedAt.year != now.year ||
+          boardedAt.month != now.month ||
+          boardedAt.day != now.day)
+        continue;
+      final fare = (data['fare'] as num?)?.toDouble() ?? 0;
+      final tripDriverId = '${data['driverId'] ?? ''}';
+      if (tripDriverId.isNotEmpty) {
+        todayRevenueByDriver[tripDriverId] =
+            (todayRevenueByDriver[tripDriverId] ?? 0) + fare;
+      } else if (vehicleId.isNotEmpty) {
+        legacyRevenueByVehicle[vehicleId] =
+            (legacyRevenueByVehicle[vehicleId] ?? 0) + fare;
+      }
+    }
+    for (final doc in drivers) {
       final data = doc.data();
       final quota = (data['dailyQuota'] as num?)?.toDouble() ?? 0;
       final earnings =
-          (data['tripIncome'] as num?)?.toDouble() ??
-          (data['todayIncome'] as num?)?.toDouble() ??
-          0;
+          (todayRevenueByDriver[doc.id] ?? 0) +
+          (legacyRevenueByVehicle['${data['vehicleId'] ?? ''}'] ?? 0);
       if (quota <= 0 || earnings < quota) continue;
       alerts.add(
         AdminAlert(
-          id: 'vehicleQuota:${doc.reference.path}',
+          id: 'driverQuota:${doc.reference.path}:${now.year}-${now.month}-${now.day}',
           category: 'Quota Fulfilment',
           title: 'Daily quota fulfilled',
           message:
-              '${data['name'] ?? 'Vehicle'} reached PHP ${earnings.toStringAsFixed(2)} of its PHP ${quota.toStringAsFixed(2)} quota.',
+              '${data['firstName'] ?? ''} ${data['lastName'] ?? ''} reached PHP ${earnings.toStringAsFixed(2)} of the PHP ${quota.toStringAsFixed(2)} daily quota.',
           icon: Icons.task_alt_outlined,
           color: const Color(0xFFB3261E),
-          date: _date(data['updatedAt'] ?? data['createdAt']),
-          destination: 1,
+          date: now,
+          destination: 2,
         ),
       );
     }
@@ -465,8 +496,12 @@ class AdminNotificationCenter {
     String collection,
   ) async {
     try {
-      return (await _db.collection(collection).limit(50).get()
-          .timeout(const Duration(seconds: 8))).docs;
+      return (await _db
+              .collection(collection)
+              .limit(50)
+              .get()
+              .timeout(const Duration(seconds: 8)))
+          .docs;
     } catch (_) {
       return const [];
     }

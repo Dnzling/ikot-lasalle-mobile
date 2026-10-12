@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import '../services/export_service.dart';
 import '../services/firebase_service.dart';
 import '../services/pick_excel.dart';
@@ -24,13 +23,7 @@ class UsersPage extends StatefulWidget {
 }
 
 class _UsersPageState extends State<UsersPage> {
-  static const _headers = [
-    'First name',
-    'Last name',
-    'ID number',
-    'User type',
-    'Contact number',
-  ];
+  static const _headers = ['First name', 'Last name', 'ID number', 'User type'];
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? subscription;
   final users = <AppUser>[];
   final searchController = TextEditingController();
@@ -75,7 +68,6 @@ class _UsersPageState extends State<UsersPage> {
     final first = TextEditingController();
     final last = TextEditingController();
     final id = TextEditingController();
-    final contact = TextEditingController();
     var type = 'Student';
     showFormDialog(
       context,
@@ -96,12 +88,6 @@ class _UsersPageState extends State<UsersPage> {
           ],
           onChanged: (value) => type = value ?? 'Student',
         ),
-        TextField(
-          controller: contact,
-          keyboardType: TextInputType.phone,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
-          decoration: const InputDecoration(labelText: 'Contact number (11 digits)'),
-        ),
         const Text(
           'Initial password: LAST NAME in uppercase.',
           style: TextStyle(
@@ -116,7 +102,6 @@ class _UsersPageState extends State<UsersPage> {
           'lastName': last.text,
           'idNumber': id.text,
           'userType': type,
-          'contactNumber': contact.text,
         }),
       ),
     );
@@ -124,9 +109,6 @@ class _UsersPageState extends State<UsersPage> {
 
   Future<void> _saveUser(Map<String, dynamic> data) async {
     try {
-      if (!RegExp(r'^\d{11}$').hasMatch('${data['contactNumber'] ?? ''}'.trim())) {
-        throw const FormatException('Contact number must contain exactly 11 digits.');
-      }
       await FirebaseService.instance.createUserAccount(data);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -148,9 +130,7 @@ class _UsersPageState extends State<UsersPage> {
         fileName: 'passenger_users.xlsx',
         title: 'Passenger users',
         headers: _headers,
-        rows: users
-            .map((u) => [u.first, u.last, u.id, u.type, u.contact])
-            .toList(),
+        rows: users.map((u) => [u.first, u.last, u.id, u.type]).toList(),
       );
     } catch (error) {
       if (mounted) _notice('Could not export users: $error');
@@ -183,7 +163,7 @@ class _UsersPageState extends State<UsersPage> {
               ).join('|').toLowerCase() !=
               _headers.join('|').toLowerCase()) {
         throw const FormatException(
-          'Use the exported Excel format: First name, Last name, ID number, User type, Contact number.',
+          'Use the exported Excel format: First name, Last name, ID number, User type.',
         );
       }
       final entries = <Map<String, dynamic>>[];
@@ -193,11 +173,10 @@ class _UsersPageState extends State<UsersPage> {
         final row = sheet.rows[i];
         final values = List.generate(_headers.length, (j) => _cell(row, j));
         if (values.every((v) => v.isEmpty)) continue;
-        final [first, last, id, type, contact] = values;
+        final [first, last, id, type] = values;
         if (first.isEmpty ||
             last.isEmpty ||
             id.isEmpty ||
-            !RegExp(r'^\d{11}$').hasMatch(contact) ||
             !const {'Student', 'Teacher', 'Visitor', 'Staff'}.contains(type)) {
           errors.add('Row ${i + 1}: missing field or invalid user type');
           continue;
@@ -212,7 +191,6 @@ class _UsersPageState extends State<UsersPage> {
           'lastName': last,
           'idNumber': id,
           'userType': type,
-          'contactNumber': contact,
         });
       }
       if (entries.isEmpty) {

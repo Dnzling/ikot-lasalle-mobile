@@ -13,6 +13,14 @@ import '../models/passenger.dart';
 import '../models/top_up_request.dart';
 import 'password_policy.dart';
 
+bool vehicleGpsIsFresh(Map<String, dynamic> vehicle) {
+  final lastGpsAt = vehicle['lastGpsAt'];
+  if (lastGpsAt is! Timestamp) return false;
+  final age = DateTime.now().difference(lastGpsAt.toDate());
+  return age >= const Duration(seconds: -5) &&
+      age <= const Duration(seconds: 30);
+}
+
 class PassengerFirebaseService {
   const PassengerFirebaseService();
 
@@ -152,24 +160,72 @@ class PassengerFirebaseService {
       if (matches.docs.isEmpty) {
         Error.throwWithStackTrace(aliasError, stackTrace);
       }
-      final authEmail = '${matches.docs.first.data()['email'] ?? ''}'.trim();
-      if (authEmail.isEmpty) {
+      final profileData = matches.docs.first.data();
+      final emailCandidates = <String>[
+        '${profileData['pendingEmail'] ?? ''}'.trim(),
+        '${profileData['email'] ?? ''}'.trim(),
+      ].where((email) => email.isNotEmpty).toSet();
+      if (emailCandidates.isEmpty) {
         Error.throwWithStackTrace(aliasError, stackTrace);
       }
-      credential = await _auth.signInWithEmailAndPassword(
-        email: authEmail,
-        password: password,
-      );
+      UserCredential? emailCredential;
+      FirebaseAuthException? latestEmailError;
+      for (final authEmail in emailCandidates) {
+        try {
+          emailCredential = await _auth.signInWithEmailAndPassword(
+            email: authEmail,
+            password: password,
+          );
+          latestEmailError = null;
+          break;
+        } on FirebaseAuthException catch (error) {
+          latestEmailError = error;
+          if (error.code != 'user-not-found' &&
+              error.code != 'invalid-credential' &&
+              error.code != 'wrong-password') {
+            rethrow;
+          }
+        }
+      }
+      if (emailCredential == null) {
+        if (latestEmailError != null) {
+          Error.throwWithStackTrace(latestEmailError, stackTrace);
+        }
+        Error.throwWithStackTrace(aliasError, stackTrace);
+      }
+      credential = emailCredential;
     }
     final user = credential.user!;
     final profile = await _db.collection('users').doc(user.uid).get();
-    final data = profile.data();
+    var data = profile.data();
     if (data == null || data['idNumber'] != cleanId) {
       await _auth.signOut();
       throw FirebaseAuthException(
         code: 'passenger-profile-not-found',
         message: 'No passenger profile is linked to this ID number.',
       );
+    }
+    // Email verification changes the Firebase Auth email first. A passenger
+    // may sign out before pressing the Home screen's refresh button, leaving
+    // the Firestore lookup stale. Once Auth confirms the verified address,
+    // repair that mapping as part of the successful sign-in.
+    if (user.emailVerified && user.email != null && user.email!.isNotEmpty) {
+      try {
+        await _db.collection('users').doc(user.uid).set({
+          'email': user.email!.trim().toLowerCase(),
+          'emailVerified': true,
+          'emailVerifiedAt': FieldValue.serverTimestamp(),
+          'pendingEmail': FieldValue.delete(),
+        }, SetOptions(merge: true));
+      } catch (_) {
+        // Authentication has succeeded; do not turn a profile-sync issue
+        // into a misleading invalid-credential login failure.
+      }
+      data = {
+        ...data,
+        'email': user.email!.trim().toLowerCase(),
+        'emailVerified': true,
+      };
     }
     // A hot restart can show the login screen while this same installation
     // still holds its Firebase Auth session. Resume that session instead of
@@ -196,11 +252,15 @@ class PassengerFirebaseService {
       if (activeSession is Map && activeSession['active'] == true) {
         final oldSessionId = '${activeSession['id'] ?? ''}';
         if (oldSessionId.isNotEmpty) {
-          transaction.set(userRef.collection('sessions').doc(oldSessionId), {
-            'active': false,
-            'endReason': 'newDevice',
-            'endedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
+          transaction.set(
+            userRef.collection('sessions').doc(oldSessionId),
+            {
+              'active': false,
+              'endReason': 'newDevice',
+              'endedAt': FieldValue.serverTimestamp(),
+            },
+            SetOptions(merge: true),
+          );
         }
         transaction.update(userRef, {
           'session.active': false,
@@ -240,6 +300,99 @@ class PassengerFirebaseService {
     final data = snapshot.data();
     if (data == null) throw StateError('Passenger profile not found.');
     return _passenger(uid, data);
+  }
+
+  Future<bool> sendPassengerEmailVerification({
+    required String uid,
+    required String email,
+  }) async {
+    final cleanEmail = email.trim().toLowerCase();
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(cleanEmail)) {
+      throw ArgumentError('Enter a valid email address.');
+    }
+    final user = _auth.currentUser;
+    if (user == null || user.uid != uid) {
+      throw StateError('Your login session expired. Please sign in again.');
+    }
+    if (user.email?.toLowerCase() == cleanEmail.toLowerCase() &&
+        user.emailVerified) {
+      await _db.collection('users').doc(uid).set({
+        'email': cleanEmail,
+        'emailVerified': true,
+        'emailVerifiedAt': FieldValue.serverTimestamp(),
+        'pendingEmail': FieldValue.delete(),
+      }, SetOptions(merge: true));
+      return true;
+    }
+    await _db.collection('users').doc(uid).set({
+      'pendingEmail': cleanEmail,
+      'emailVerified': false,
+      'emailVerificationSentAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    await user.verifyBeforeUpdateEmail(cleanEmail);
+    return false;
+  }
+
+  Future<({String email, bool verified})> refreshPassengerEmail({
+    required String uid,
+  }) async {
+    var user = _auth.currentUser;
+    if (user == null || user.uid != uid) {
+      throw StateError('Your login session expired. Please sign in again.');
+    }
+    await user.reload();
+    user = _auth.currentUser;
+    final email = (user?.email ?? '').toLowerCase();
+    final verified = user?.emailVerified ?? false;
+    final userRef = _db.collection('users').doc(uid);
+    if (verified && email.isNotEmpty) {
+      await userRef.set({
+        'email': email,
+        'emailVerified': true,
+        'emailVerifiedAt': FieldValue.serverTimestamp(),
+        'pendingEmail': FieldValue.delete(),
+      }, SetOptions(merge: true));
+    }
+    return (email: email, verified: verified);
+  }
+
+  Future<void> sendPasswordResetLink({
+    required String firstName,
+    required String lastName,
+    required String email,
+  }) async {
+    final cleanFirst = firstName.trim();
+    final cleanLast = lastName.trim();
+    final cleanEmail = email.trim().toLowerCase();
+    if (cleanFirst.isEmpty || cleanLast.isEmpty || cleanEmail.isEmpty) {
+      throw ArgumentError('Enter your first name, last name, and email.');
+    }
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(cleanEmail)) {
+      throw ArgumentError('Enter a valid email address.');
+    }
+    final matches = await _db
+        .collection('users')
+        .where('email', isEqualTo: cleanEmail)
+        .limit(5)
+        .get()
+        .timeout(const Duration(seconds: 15));
+    final matchingProfile = matches.docs.any((doc) {
+      final data = doc.data();
+      // Firestore's emailVerified flag can lag behind Firebase Auth when a
+      // passenger follows the verification link outside the app. Matching the
+      // profile establishes the requested identity fields; Firebase's reset
+      // link itself is the authoritative proof of inbox access.
+      return '${data['firstName'] ?? ''}'.trim().toLowerCase() ==
+              cleanFirst.toLowerCase() &&
+          '${data['lastName'] ?? ''}'.trim().toLowerCase() ==
+              cleanLast.toLowerCase();
+    });
+    if (!matchingProfile) {
+      throw StateError('The name and email do not match a passenger account.');
+    }
+    await _auth
+        .sendPasswordResetEmail(email: cleanEmail)
+        .timeout(const Duration(seconds: 20));
   }
 
   Future<void> requestPasswordReset({
@@ -370,11 +523,14 @@ class PassengerFirebaseService {
             status: '${data['status'] ?? 'idle'}',
             type: '${data['type'] ?? 'Jeep'}',
             speedKmh: _number(data['speedKmh']),
+            lastGpsAt: (data['lastGpsAt'] as Timestamp?)?.toDate(),
           );
         })
         .where(
           (bus) =>
+              bus.hasFreshGps &&
               (bus.status.toLowerCase() == 'active' ||
+                  bus.status.toLowerCase() == 'idle' ||
                   bus.status.toLowerCase() == 'onroute') &&
               (bus.latitude != 0 || bus.longitude != 0),
         )
@@ -399,10 +555,12 @@ class PassengerFirebaseService {
                 status: '${data['status'] ?? 'idle'}',
                 type: '${data['type'] ?? 'Jeep'}',
                 speedKmh: _number(data['speedKmh']),
+                lastGpsAt: (data['lastGpsAt'] as Timestamp?)?.toDate(),
               );
             })
             .where(
               (bus) =>
+                  bus.hasFreshGps &&
                   bus.latitude.isFinite &&
                   bus.longitude.isFinite &&
                   bus.latitude.abs() <= 90 &&
@@ -749,7 +907,12 @@ class PassengerFirebaseService {
       if (vehicle == null ||
           vehicle['archived'] == true ||
           vehicle['type'] != vehicleType ||
-          vehicle['status'] != 'active') {
+          !const {
+            'active',
+            'idle',
+            'onroute',
+          }.contains('${vehicle['status'] ?? ''}'.toLowerCase()) ||
+          !vehicleGpsIsFresh(vehicle)) {
         throw StateError(
           'This vehicle is not active or the QR code is invalid.',
         );
@@ -762,6 +925,16 @@ class PassengerFirebaseService {
       }
       final fare = _number(trip['fare']);
       final balance = _number(user['balance']);
+      final destinationRouteId = '${trip['destinationRouteId'] ?? ''}'.trim();
+      final expected = Map<String, dynamic>.from(
+        vehicle['expectedOutboardByStop'] is Map
+            ? vehicle['expectedOutboardByStop'] as Map
+            : const <String, dynamic>{},
+      );
+      if (destinationRouteId.isNotEmpty) {
+        expected[destinationRouteId] =
+            ((expected[destinationRouteId] as num?)?.toInt() ?? 0) + count;
+      }
       if (balance < fare) {
         throw StateError('Insufficient credits. Please top up first.');
       }
@@ -771,10 +944,13 @@ class PassengerFirebaseService {
         'vehicleId': vehicleId,
         'vehicleName': vehicle['name'],
         'vehicleType': vehicleType,
+        'driverId': vehicle['driverId'],
+        'driverName': vehicle['driverName'],
         'boardedAt': FieldValue.serverTimestamp(),
       });
       transaction.update(vehicleRef, {
         'onBoardPassengers': onboard + count,
+        'expectedOutboardByStop': expected,
         'tripPassengerCount': FieldValue.increment(count),
         'tripIncome': FieldValue.increment(fare),
       });
@@ -828,9 +1004,26 @@ class PassengerFirebaseService {
       if (vehicleRef != null && vehicle?.exists == true) {
         final onboard =
             (vehicle?.data()?['onBoardPassengers'] as num?)?.toInt() ?? 0;
+        final destinationRouteId = '${trip['destinationRouteId'] ?? ''}'.trim();
+        final expected = Map<String, dynamic>.from(
+          vehicle?.data()?['expectedOutboardByStop'] is Map
+              ? vehicle!.data()!['expectedOutboardByStop'] as Map
+              : const <String, dynamic>{},
+        );
+        if (destinationRouteId.isNotEmpty) {
+          final remaining =
+              (((expected[destinationRouteId] as num?)?.toInt() ?? 0) - count)
+                  .clamp(0, 999999999);
+          if (remaining == 0) {
+            expected.remove(destinationRouteId);
+          } else {
+            expected[destinationRouteId] = remaining;
+          }
+        }
         transaction.update(vehicleRef, {
           'onBoardPassengers': (onboard - count).clamp(0, 999999999),
           'outBoardPassengers': FieldValue.increment(count),
+          'expectedOutboardByStop': expected,
         });
       }
       transaction.update(tripRef, {

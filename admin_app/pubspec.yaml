@@ -41,6 +41,7 @@ dependencies:
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
   pdf: ^3.11.3
+  printing: ^5.14.3
   qr_flutter: ^4.1.0
 
 dev_dependencies:
