@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Hardware sketches contain local Wi-Fi and Firebase device credentials.
 # /hardwarecode.cpp
 # /hardwarecode1.cpp
@@ -10,7 +9,6 @@
 firebase-debug.log
 **/firebase-debug.log
 
-=======
 # Miscellaneous
 *.class
 *.lock
@@ -130,4 +128,18 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
->>>>>>> 9102b01a4da686c4fba05884e658e855c3dffff6
+
+# Local dependencies, caches, credentials, and release artifacts.
+**/node_modules/
+**/.pnpm-store/
+**/.firebase-cli-config/
+**/.pending_firestore_ruleset
+**/firebase-debug.log
+**/.env
+**/.env.*
+!**/.env.example
+**/*firebase-adminsdk*.json
+**/*service-account*.json
+**/firebase-service-account.json
+**/*.apk
+**/*.aab

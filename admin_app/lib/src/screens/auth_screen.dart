@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/firebase_service.dart';
+import 'create_admin_screen.dart';
 import 'shell_screen.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -10,59 +12,42 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  bool register = false, obscure = true;
+  bool obscure = true;
   bool loading = false;
-  final first = TextEditingController();
-  final last = TextEditingController();
+  bool checkingSetup = true;
+  bool setupAvailable = false;
+  String? setupError;
   final idNumber = TextEditingController();
-  final email = TextEditingController();
   final password = TextEditingController();
 
+  @override
+  void initState() {
+    super.initState();
+    _checkAdminSetup();
+  }
+
+  Future<void> _checkAdminSetup() async {
+    try {
+      final available = await FirebaseService.instance.canCreateInitialAdmin();
+      if (mounted) setState(() => setupAvailable = available);
+    } on FirebaseException catch (error) {
+      if (mounted) setState(() => setupError = error.message ?? error.code);
+    } finally {
+      if (mounted) setState(() => checkingSetup = false);
+    }
+  }
+
   Future<void> _submit() async {
-    if (idNumber.text.trim().isEmpty ||
-        password.text.isEmpty ||
-        (register &&
-            (first.text.trim().isEmpty ||
-                last.text.trim().isEmpty ||
-                email.text.trim().isEmpty))) {
+    if (idNumber.text.trim().isEmpty || password.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            register
-                ? 'Enter your name, ID number, email, and password.'
-                : 'Enter your ID number and password.',
-          ),
-        ),
+        const SnackBar(content: Text('Enter your ID number and password.')),
       );
       return;
     }
     setState(() => loading = true);
     try {
-      if (register) {
-        await FirebaseService.instance.registerAdmin(
-          first.text,
-          last.text,
-          idNumber.text,
-          email.text,
-          password.text,
-        );
-      } else {
-        await FirebaseService.instance.signIn(idNumber.text, password.text);
-      }
+      await FirebaseService.instance.signIn(idNumber.text, password.text);
       if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const AdminShell()),
-        );
-      }
-    } on AdminProfileWriteException catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Account created, but Firestore could not save the admin profile (${error.code}). Check Firestore rules.',
-            ),
-          ),
-        );
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const AdminShell()),
         );
@@ -78,7 +63,7 @@ class _AuthScreenState extends State<AuthScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Firebase ${error.code}: ${error.message ?? 'request failed'}',
+              'Request ${error.code}: ${error.message ?? 'request failed'}',
             ),
           ),
         );
@@ -87,25 +72,11 @@ class _AuthScreenState extends State<AuthScreen> {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text(_message(error))));
+        ).showSnackBar(SnackBar(content: Text('Sign-in failed: $error')));
       }
     } finally {
       if (mounted) setState(() => loading = false);
     }
-  }
-
-  String _message(Object error) {
-    final text = error.toString();
-    if (text.contains('invalid-credential')) {
-      return 'Incorrect ID number or password.';
-    }
-    if (text.contains('email-already-in-use')) {
-      return 'That email already has an account.';
-    }
-    if (text.contains('weak-password')) {
-      return 'Use a password with at least 6 characters.';
-    }
-    return 'Registration failed: $error';
   }
 
   String _authMessage(FirebaseAuthException error) => switch (error.code) {
@@ -114,13 +85,13 @@ class _AuthScreenState extends State<AuthScreen> {
       'That email already has an account. Try signing in instead.',
     'weak-password' => 'Use a password with at least 6 characters.',
     'operation-not-allowed' =>
-      'Email/Password sign-in is disabled in Firebase Authentication.',
+      'Email/Password sign-in is disabled for this app.',
     'network-request-failed' =>
-      'Firebase could not reach the network. Check your connection.',
+      'The server could not be reached. Check your connection.',
     'invalid-api-key' =>
-      'The Firebase API key is invalid or restricted for this app.',
+      'The app key is invalid or restricted for this app.',
     'invalid-credential' => 'Incorrect ID number or password.',
-    _ => 'Firebase Auth ${error.code}: ${error.message ?? 'request failed'}',
+    _ => 'Sign-in ${error.code}: ${error.message ?? 'request failed'}',
   };
 
   @override
@@ -204,60 +175,35 @@ class _AuthScreenState extends State<AuthScreen> {
                     const _Brand(),
                     const SizedBox(height: 56),
                     Text(
-                      register ? 'Create admin account' : 'Welcome back',
+                      'Welcome back',
                       style: theme.textTheme.headlineMedium?.copyWith(
                         fontWeight: FontWeight.w800,
                       ),
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      register
-                          ? 'Enter your details to get started.'
-                          : 'Sign in to manage your transport network.',
+                      'Sign in to manage your transport network.',
                       style: const TextStyle(color: Color(0xFF68756E)),
                     ),
                     const SizedBox(height: 32),
-                    if (register) ...[
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _Field(
-                              label: 'First name',
-                              icon: Icons.person_outline,
-                              controller: first,
-                            ),
-                          ),
-                          SizedBox(width: 14),
-                          Expanded(
-                            child: _Field(
-                              label: 'Last name',
-                              icon: Icons.person_outline,
-                              controller: last,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                    ],
                     _Field(
                       label: 'ID number',
                       icon: Icons.badge_outlined,
                       controller: idNumber,
+                      keyboardType: TextInputType.text,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'[A-Za-z0-9]'),
+                        ),
+                      ],
                     ),
-                    if (register) ...[
-                      const SizedBox(height: 16),
-                      _Field(
-                        label: 'Email address',
-                        icon: Icons.email_outlined,
-                        controller: email,
-                      ),
-                    ],
                     const SizedBox(height: 16),
                     TextField(
                       controller: password,
                       obscureText: obscure,
                       decoration: InputDecoration(
                         labelText: 'Password',
+                        helperText: 'Special characters are allowed.',
                         prefixIcon: const Icon(Icons.lock_outline),
                         suffixIcon: IconButton(
                           onPressed: () => setState(() => obscure = !obscure),
@@ -283,9 +229,30 @@ class _AuthScreenState extends State<AuthScreen> {
                                   strokeWidth: 2,
                                 ),
                               )
-                            : Text(register ? 'Create account' : 'Sign in'),
+                            : const Text('Sign in'),
                       ),
                     ),
+                    if (setupAvailable) ...[
+                      const SizedBox(height: 12),
+                      Center(
+                        child: TextButton(
+                          onPressed: loading
+                              ? null
+                              : () => Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => const CreateAdminScreen(),
+                                  ),
+                                ).then((_) => _checkAdminSetup()),
+                          child: const Text('Create first admin account'),
+                        ),
+                      ),
+                    ] else if (!checkingSetup && setupError != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Admin setup status unavailable: $setupError',
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -333,13 +300,26 @@ class _Feature extends StatelessWidget {
 }
 
 class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.icon, this.controller});
+  const _Field({
+    required this.label,
+    required this.icon,
+    this.controller,
+    this.maxLength,
+    this.keyboardType,
+    this.inputFormatters,
+  });
   final String label;
   final IconData icon;
   final TextEditingController? controller;
+  final int? maxLength;
+  final TextInputType? keyboardType;
+  final List<TextInputFormatter>? inputFormatters;
   @override
   Widget build(BuildContext context) => TextField(
     controller: controller,
+    maxLength: maxLength,
+    keyboardType: keyboardType,
+    inputFormatters: inputFormatters,
     decoration: InputDecoration(labelText: label, prefixIcon: Icon(icon)),
   );
 }

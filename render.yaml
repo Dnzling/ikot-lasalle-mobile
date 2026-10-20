@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ikot-hardware-relay
+    runtime: node
+    plan: free
+    rootDir: hardware_relay
+    buildCommand: corepack pnpm install --frozen-lockfile
+    startCommand: pnpm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/firebase-service-account.json
+      - key: VEHICLE_DOCUMENT_IDS
+        sync: false
+      - key: RELAY_KEY_HEX
+        sync: false

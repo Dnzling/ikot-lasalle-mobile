@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class PageIntro extends StatelessWidget {
   const PageIntro({
@@ -55,22 +56,148 @@ class StatusPill extends StatelessWidget {
   );
 }
 
-class MiniChart extends StatelessWidget {
+class MiniChart extends StatefulWidget {
   const MiniChart({
     super.key,
     required this.values,
+    this.labels,
     this.color = const Color(0xFF0A8A4B),
     this.height = 190,
   });
   final List<double> values;
+  final List<String>? labels;
   final Color color;
   final double height;
+
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    width: double.infinity,
-    child: CustomPaint(painter: _ChartPainter(values, color)),
-  );
+  State<MiniChart> createState() => _MiniChartState();
+}
+
+class _MiniChartState extends State<MiniChart> {
+  int? hoveredIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    final values = widget.values;
+    final maximum = values.fold<double>(
+      0,
+      (current, value) => value > current ? value : current,
+    );
+    final total = values.fold<double>(0, (sum, value) => sum + value);
+    final plotted = maximum == 0
+        ? List<double>.filled(values.length, 0)
+        : values.map((value) => value / maximum * 100).toList();
+    return SizedBox(
+      height: widget.height,
+      width: double.infinity,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final index = hoveredIndex != null && hoveredIndex! < values.length
+              ? hoveredIndex
+              : null;
+          final x = index == null || values.length < 2
+              ? 0.0
+              : constraints.maxWidth * index / (values.length - 1);
+          final y = index == null
+              ? 0.0
+              : widget.height - plotted[index] / 100 * widget.height;
+          final tooltipLeft = (x - 88)
+              .clamp(
+                0.0,
+                (constraints.maxWidth - 176).clamp(0.0, double.infinity),
+              )
+              .toDouble();
+          final tooltipTop = (y - 68)
+              .clamp(0.0, (widget.height - 56).clamp(0.0, double.infinity))
+              .toDouble();
+          return MouseRegion(
+            onHover: (event) {
+              if (values.isEmpty) return;
+              if (constraints.maxWidth <= 0) return;
+              final position = event.localPosition.dx.clamp(
+                0.0,
+                constraints.maxWidth,
+              );
+              final next = values.length == 1
+                  ? 0
+                  : (position / constraints.maxWidth * (values.length - 1))
+                        .round()
+                        .clamp(0, values.length - 1)
+                        .toInt();
+              if (next != hoveredIndex) setState(() => hoveredIndex = next);
+            },
+            onExit: (_) => setState(() => hoveredIndex = null),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _ChartPainter(plotted, widget.color),
+                  ),
+                ),
+                if (index != null) ...[
+                  Positioned(
+                    left: (x - 5)
+                        .clamp(
+                          0.0,
+                          (constraints.maxWidth - 10).clamp(
+                            0.0,
+                            double.infinity,
+                          ),
+                        )
+                        .toDouble(),
+                    top: (y - 5)
+                        .clamp(
+                          0.0,
+                          (widget.height - 10).clamp(0.0, double.infinity),
+                        )
+                        .toDouble(),
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 10,
+                        height: 10,
+                        decoration: BoxDecoration(
+                          color: widget.color,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: tooltipLeft,
+                    top: tooltipTop,
+                    child: IgnorePointer(
+                      child: Material(
+                        color: const Color(0xFF073F28),
+                        borderRadius: BorderRadius.circular(8),
+                        elevation: 4,
+                        child: SizedBox(
+                          width: 176,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 7,
+                            ),
+                            child: Text(
+                              '${widget.labels != null && index < widget.labels!.length && widget.labels![index].isNotEmpty ? widget.labels![index] : 'Day ${index + 1}'}: PHP ${values[index].toStringAsFixed(2)}\n${total == 0 ? '0.0' : (values[index] / total * 100).toStringAsFixed(1)}% of period total',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
 }
 
 class _ChartPainter extends CustomPainter {
@@ -296,13 +423,27 @@ class _MapPainter extends CustomPainter {
 }
 
 class FormFieldBox extends StatelessWidget {
-  const FormFieldBox(this.label, {super.key, this.hint, this.controller});
+  const FormFieldBox(
+    this.label, {
+    super.key,
+    this.hint,
+    this.controller,
+    this.maxLength,
+    this.inputFormatters,
+    this.keyboardType,
+  });
   final String label;
   final String? hint;
   final TextEditingController? controller;
+  final int? maxLength;
+  final List<TextInputFormatter>? inputFormatters;
+  final TextInputType? keyboardType;
   @override
   Widget build(BuildContext context) => TextField(
     controller: controller,
+    maxLength: maxLength,
+    inputFormatters: inputFormatters,
+    keyboardType: keyboardType,
     decoration: InputDecoration(labelText: label, hintText: hint),
   );
 }

@@ -1,0 +1,13 @@
+{
+  "name": "ikot-hardware-relay",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.19.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

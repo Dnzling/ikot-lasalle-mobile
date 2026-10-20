@@ -116,23 +116,16 @@ class _BookingScreenState extends State<BookingScreen> {
     if (!_validTrip) return;
     final pickup = '${routes[_pickupIndex]['name']}';
     final destination = '${routes[_destinationIndex]['name']}';
-    final fareType = _isRoundTrip ? 'roundTrip' : 'default';
     setState(() => loading = true);
     try {
-      // Refresh immediately before saving so a recently edited admin fare wins.
       final service = const PassengerFirebaseService();
-      final fares = await service.getFareSettings();
-      final fare =
-          (fareType == 'roundTrip' ? fares.roundTripFare : fares.defaultFare) *
-          quantity;
-      if (fare <= 0) throw StateError('Fare settings are not configured.');
       final id = await service.createBooking(
         uid: widget.session.uid,
         pickup: pickup,
         destination: destination,
         passengerCount: quantity,
-        fare: fare,
-        fareType: fareType,
+        fare: 0,
+        fareType: 'pending',
         pickupRouteId: pickupRouteId!,
         destinationRouteId: dropOffRouteId!,
       );
@@ -145,7 +138,7 @@ class _BookingScreenState extends State<BookingScreen> {
             bookingId: id,
             destination: destination,
             passengerCount: quantity,
-            fare: fare,
+            fare: 0,
             pickup: pickup,
             pickupRouteId: pickupRouteId,
             destinationRouteId: dropOffRouteId,
@@ -262,10 +255,8 @@ class _BookingScreenState extends State<BookingScreen> {
           ),
           if (_validTrip) ...[
             const SizedBox(height: 12),
-            Text(
-              '${_isRoundTrip ? 'Round Trip Fare' : 'Default Fare'}: PHP ${_farePerPassenger.toStringAsFixed(2)} × $quantity = PHP ${(_farePerPassenger * quantity).toStringAsFixed(2)}',
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
+            const Text('Fare calculated when you board a vehicle.',
+                style: TextStyle(fontWeight: FontWeight.w700)),
           ],
           const SizedBox(height: 24),
           SizedBox(

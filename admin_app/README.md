@@ -1,7 +1,7 @@
 # IKOT La Salle Admin
 
 Desktop-first Flutter admin client connected to Firebase project
-`ikot-lasalle-ccfab`.
+`ikot-lasalle-2bed1`.
 
 ## Firebase collections
 

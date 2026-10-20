@@ -1,13 +1,32 @@
 {
   "project_info": {
-    "project_number": "1002016926977",
-    "project_id": "ikot-lasalle-ccfab",
-    "storage_bucket": "ikot-lasalle-ccfab.firebasestorage.app"
+    "project_number": "896555643484",
+    "project_id": "ikot-lasalle-2bed1",
+    "storage_bucket": "ikot-lasalle-2bed1.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:1002016926977:android:a9dc37107d13602467ff00",
+        "mobilesdk_app_id": "1:896555643484:android:09f5bc8e8bba6f2c946c99",
+        "android_client_info": {
+          "package_name": "com.example.admin_page"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDb7ENHyRh983Pd2i_jD9mCeGlLmkFWvXI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:896555643484:android:c6a16a2b8f43b935946c99",
         "android_client_info": {
           "package_name": "com.example.ikot_lasalle"
         }
@@ -15,7 +34,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyAWl-gllrN2h1i5ePjEtAPBBTU6RUUuOSc"
+          "current_key": "AIzaSyDb7ENHyRh983Pd2i_jD9mCeGlLmkFWvXI"
         }
       ],
       "services": {

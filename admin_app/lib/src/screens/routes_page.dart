@@ -16,6 +16,8 @@ class _RoutesPageState extends State<RoutesPage> {
 
   void _addRoute() {
     final name = TextEditingController();
+    final latitude = TextEditingController(text: '14.3225');
+    final longitude = TextEditingController(text: '120.9630');
     var radius = 50.0;
     var point = const GeoPoint(14.3225, 120.9630);
     showDialog(
@@ -29,6 +31,60 @@ class _RoutesPageState extends State<RoutesPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 FormFieldBox('Route name', controller: name),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: latitude,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                        onChanged: (_) {
+                          final lat = double.tryParse(latitude.text);
+                          final lon = double.tryParse(longitude.text);
+                          if (lat != null &&
+                              lon != null &&
+                              lat >= -90 &&
+                              lat <= 90 &&
+                              lon >= -180 &&
+                              lon <= 180) {
+                            point = GeoPoint(lat, lon);
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: longitude,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                        onChanged: (_) {
+                          final lat = double.tryParse(latitude.text);
+                          final lon = double.tryParse(longitude.text);
+                          if (lat != null &&
+                              lon != null &&
+                              lat >= -90 &&
+                              lat <= 90 &&
+                              lon >= -180 &&
+                              lon <= 180) {
+                            point = GeoPoint(lat, lon);
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
@@ -57,9 +113,7 @@ class _RoutesPageState extends State<RoutesPage> {
                 const SizedBox(height: 12),
                 const Align(
                   alignment: Alignment.centerLeft,
-                  child: Text(
-                    'Click or drag the pin to set the GeoPoint.',
-                  ),
+                  child: Text('Click or drag the pin to set the GeoPoint.'),
                 ),
                 const SizedBox(height: 10),
                 SizedBox(
@@ -67,8 +121,11 @@ class _RoutesPageState extends State<RoutesPage> {
                   child: RealMap(
                     interactivePin: true,
                     radiusMeters: radius,
-                    onLocationChanged: (location) =>
-                        point = GeoPoint(location.latitude, location.longitude),
+                    onLocationChanged: (location) {
+                      point = GeoPoint(location.latitude, location.longitude);
+                      latitude.text = location.latitude.toStringAsFixed(6);
+                      longitude.text = location.longitude.toStringAsFixed(6);
+                    },
                   ),
                 ),
               ],
@@ -85,6 +142,18 @@ class _RoutesPageState extends State<RoutesPage> {
                   _notice('Enter a route name.');
                   return;
                 }
+                final parsedLatitude = double.tryParse(latitude.text);
+                final parsedLongitude = double.tryParse(longitude.text);
+                if (parsedLatitude == null ||
+                    parsedLongitude == null ||
+                    parsedLatitude < -90 ||
+                    parsedLatitude > 90 ||
+                    parsedLongitude < -180 ||
+                    parsedLongitude > 180) {
+                  _notice('Enter valid latitude and longitude coordinates.');
+                  return;
+                }
+                point = GeoPoint(parsedLatitude, parsedLongitude);
                 Navigator.pop(dialogContext);
                 try {
                   await FirebaseService.instance.addRoute(
@@ -94,7 +163,7 @@ class _RoutesPageState extends State<RoutesPage> {
                   );
                   _notice('Route saved.');
                 } on FirebaseException catch (error) {
-                  _notice('Firebase ${error.code}: ${error.message}');
+                  _notice('Request ${error.code}: ${error.message}');
                 }
               },
               child: const Text('Save route'),
@@ -142,7 +211,7 @@ class _RoutesPageState extends State<RoutesPage> {
           );
           _notice('Fare settings saved.');
         } on FirebaseException catch (error) {
-          _notice('Firebase ${error.code}: ${error.message}');
+          _notice('Request ${error.code}: ${error.message}');
         }
       },
     );
@@ -157,6 +226,12 @@ class _RoutesPageState extends State<RoutesPage> {
     var point = data['location'] is GeoPoint
         ? data['location'] as GeoPoint
         : const GeoPoint(14.3225, 120.9630);
+    final latitude = TextEditingController(
+      text: point.latitude.toStringAsFixed(6),
+    );
+    final longitude = TextEditingController(
+      text: point.longitude.toStringAsFixed(6),
+    );
     showDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -168,6 +243,58 @@ class _RoutesPageState extends State<RoutesPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 FormFieldBox('Route name', controller: name),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: latitude,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                        onChanged: (_) {
+                          final lat = double.tryParse(latitude.text);
+                          final lon = double.tryParse(longitude.text);
+                          if (lat != null &&
+                              lon != null &&
+                              lat >= -90 &&
+                              lat <= 90 &&
+                              lon >= -180 &&
+                              lon <= 180)
+                            point = GeoPoint(lat, lon);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: longitude,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                        onChanged: (_) {
+                          final lat = double.tryParse(latitude.text);
+                          final lon = double.tryParse(longitude.text);
+                          if (lat != null &&
+                              lon != null &&
+                              lat >= -90 &&
+                              lat <= 90 &&
+                              lon >= -180 &&
+                              lon <= 180)
+                            point = GeoPoint(lat, lon);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
@@ -202,8 +329,11 @@ class _RoutesPageState extends State<RoutesPage> {
                     interactivePin: true,
                     radiusMeters: radius,
                     label: name.text.isEmpty ? 'Route' : name.text,
-                    onLocationChanged: (location) =>
-                        point = GeoPoint(location.latitude, location.longitude),
+                    onLocationChanged: (location) {
+                      point = GeoPoint(location.latitude, location.longitude);
+                      latitude.text = location.latitude.toStringAsFixed(6);
+                      longitude.text = location.longitude.toStringAsFixed(6);
+                    },
                   ),
                 ),
               ],
@@ -216,18 +346,20 @@ class _RoutesPageState extends State<RoutesPage> {
                   final confirmed = await showDialog<bool>(
                     context: dialogContext,
                     builder: (confirmationContext) => AlertDialog(
-                      title: const Text('Archive route?'),
+                      title: const Text('Archive and remove route?'),
                       content: Text(
-                        '${data['name'] ?? 'This route'} will no longer be available for new passenger trips. Past trip records will remain.',
+                        '${data['name'] ?? 'This route'} will be hidden from active routes and unavailable for new passenger trips. Its database record and past trips will remain. You can restore it from archived routes.',
                       ),
                       actions: [
                         TextButton(
-                          onPressed: () => Navigator.pop(confirmationContext, false),
+                          onPressed: () =>
+                              Navigator.pop(confirmationContext, false),
                           child: const Text('Cancel'),
                         ),
                         FilledButton(
-                          onPressed: () => Navigator.pop(confirmationContext, true),
-                          child: const Text('Archive'),
+                          onPressed: () =>
+                              Navigator.pop(confirmationContext, true),
+                          child: const Text('Archive and Remove'),
                         ),
                       ],
                     ),
@@ -237,13 +369,13 @@ class _RoutesPageState extends State<RoutesPage> {
                   try {
                     await FirebaseService.instance.archiveRoute(route.id);
                     if (mounted) setState(() => selectedId = null);
-                    _notice('Route archived.');
+                    _notice('Route archived and removed from display. You can restore it from archived routes.');
                   } on FirebaseException catch (error) {
-                    _notice('Firebase ${error.code}: ${error.message}');
+                    _notice('Request ${error.code}: ${error.message}');
                   }
                 },
                 icon: const Icon(Icons.archive_outlined),
-                label: const Text('Archive'),
+                label: const Text('Archive and Remove'),
               )
             else
               TextButton.icon(
@@ -251,9 +383,11 @@ class _RoutesPageState extends State<RoutesPage> {
                   Navigator.pop(dialogContext);
                   try {
                     await FirebaseService.instance.restoreRoute(route.id);
-                    _notice('Route restored as inactive. Enable it when ready.');
+                    _notice(
+                      'Route restored as inactive. Enable it when ready.',
+                    );
                   } on FirebaseException catch (error) {
-                    _notice('Firebase ${error.code}: ${error.message}');
+                    _notice('Request ${error.code}: ${error.message}');
                   }
                 },
                 icon: const Icon(Icons.unarchive_outlined),
@@ -264,24 +398,40 @@ class _RoutesPageState extends State<RoutesPage> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: data['archived'] == true ? null : () async {
-                if (name.text.trim().isEmpty) {
-                  _notice('Enter a route name.');
-                  return;
-                }
-                Navigator.pop(dialogContext);
-                try {
-                  await FirebaseService.instance.updateRoute(
-                    route.id,
-                    name: name.text,
-                    radius: radius,
-                    location: point,
-                  );
-                  _notice('Route updated.');
-                } on FirebaseException catch (error) {
-                  _notice('Firebase ${error.code}: ${error.message}');
-                }
-              },
+              onPressed: data['archived'] == true
+                  ? null
+                  : () async {
+                      if (name.text.trim().isEmpty) {
+                        _notice('Enter a route name.');
+                        return;
+                      }
+                      final parsedLatitude = double.tryParse(latitude.text);
+                      final parsedLongitude = double.tryParse(longitude.text);
+                      if (parsedLatitude == null ||
+                          parsedLongitude == null ||
+                          parsedLatitude < -90 ||
+                          parsedLatitude > 90 ||
+                          parsedLongitude < -180 ||
+                          parsedLongitude > 180) {
+                        _notice(
+                          'Enter valid latitude and longitude coordinates.',
+                        );
+                        return;
+                      }
+                      point = GeoPoint(parsedLatitude, parsedLongitude);
+                      Navigator.pop(dialogContext);
+                      try {
+                        await FirebaseService.instance.updateRoute(
+                          route.id,
+                          name: name.text,
+                          radius: radius,
+                          location: point,
+                        );
+                        _notice('Route updated.');
+                      } on FirebaseException catch (error) {
+                        _notice('Request ${error.code}: ${error.message}');
+                      }
+                    },
               child: const Text('Save changes'),
             ),
           ],
@@ -307,7 +457,7 @@ class _RoutesPageState extends State<RoutesPage> {
       if (snapshot.hasError) {
         return Center(
           child: Text(
-            'Could not load routes from Firebase.\n${snapshot.error}',
+            'Could not load routes from the server.\n${snapshot.error}',
           ),
         );
       }
@@ -336,7 +486,8 @@ class _RoutesPageState extends State<RoutesPage> {
       final geoPoint = selectedData?['location'] is GeoPoint
           ? selectedData!['location'] as GeoPoint
           : null;
-      return SingleChildScrollView(
+      return LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(28),
         child: Column(
           children: [
@@ -363,7 +514,7 @@ class _RoutesPageState extends State<RoutesPage> {
             ),
             const SizedBox(height: 22),
             SizedBox(
-              height: 500,
+              height: (constraints.maxHeight - 160).clamp(500.0, 1200.0),
               child: Row(
                 children: [
                   SizedBox(
@@ -385,12 +536,18 @@ class _RoutesPageState extends State<RoutesPage> {
                                   ),
                                 ),
                                 IconButton(
-                                  tooltip: showArchived ? 'Show active routes' : 'Show archived routes',
+                                  tooltip: showArchived
+                                      ? 'Show active routes'
+                                      : 'Show archived routes',
                                   onPressed: () => setState(() {
                                     showArchived = !showArchived;
                                     selectedId = null;
                                   }),
-                                  icon: Icon(showArchived ? Icons.route_outlined : Icons.archive_outlined),
+                                  icon: Icon(
+                                    showArchived
+                                        ? Icons.route_outlined
+                                        : Icons.archive_outlined,
+                                  ),
                                 ),
                                 if (snapshot.connectionState ==
                                     ConnectionState.waiting)
@@ -426,7 +583,7 @@ class _RoutesPageState extends State<RoutesPage> {
                                           _notice('Route order updated.');
                                         } on FirebaseException catch (error) {
                                           _notice(
-                                            'Firebase ${error.code}: ${error.message}',
+                                            'Request ${error.code}: ${error.message}',
                                           );
                                         }
                                       },
@@ -445,9 +602,7 @@ class _RoutesPageState extends State<RoutesPage> {
                                             ),
                                           ),
                                           leading: CircleAvatar(
-                                            child: Text(
-                                              '${index + 1}',
-                                            ),
+                                            child: Text('${index + 1}'),
                                           ),
                                           title: Text(
                                             '${data['name'] ?? 'Unnamed route'}',
@@ -458,25 +613,27 @@ class _RoutesPageState extends State<RoutesPage> {
                                           trailing: Row(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
-                                              if (!showArchived) Switch(
-                                                value: data['active'] != false,
-                                                onChanged: (active) async {
-                                                  try {
-                                                    await FirebaseService
-                                                        .instance
-                                                        .setRouteActive(
-                                                          route.id,
-                                                          active,
-                                                        );
-                                                  } on FirebaseException catch (
-                                                    error
-                                                  ) {
-                                                    _notice(
-                                                      'Firebase ${error.code}: ${error.message}',
-                                                    );
-                                                  }
-                                                },
-                                              ),
+                                              if (!showArchived)
+                                                Switch(
+                                                  value:
+                                                      data['active'] != false,
+                                                  onChanged: (active) async {
+                                                    try {
+                                                      await FirebaseService
+                                                          .instance
+                                                          .setRouteActive(
+                                                            route.id,
+                                                            active,
+                                                          );
+                                                    } on FirebaseException catch (
+                                                      error
+                                                    ) {
+                                                      _notice(
+                                                        'Request ${error.code}: ${error.message}',
+                                                      );
+                                                    }
+                                                  },
+                                                ),
                                               ReorderableDragStartListener(
                                                 index: index,
                                                 child: const Padding(
@@ -520,6 +677,27 @@ class _RoutesPageState extends State<RoutesPage> {
                                     (selectedData?['proximityRadius'] as num?)
                                         ?.toDouble(),
                                 label: '${selectedData?['name'] ?? 'Route'}',
+                                fitAllPins: true,
+                                additionalPins: [
+                                  for (final route in routes)
+                                    if (route.id != selected.id &&
+                                        route.data()['location'] is GeoPoint)
+                                      (
+                                        latitude: (route.data()['location'] as GeoPoint).latitude,
+                                        longitude: (route.data()['location'] as GeoPoint).longitude,
+                                        label: '${route.data()['name'] ?? 'Route'}',
+                                      ),
+                                ],
+                                additionalRadii: [
+                                  for (final route in routes)
+                                    if (route.id != selected.id &&
+                                        route.data()['location'] is GeoPoint)
+                                      (
+                                        latitude: (route.data()['location'] as GeoPoint).latitude,
+                                        longitude: (route.data()['location'] as GeoPoint).longitude,
+                                        radiusMeters: ((route.data()['proximityRadius'] as num?)?.toDouble() ?? 40),
+                                      ),
+                                ],
                               ),
                       ),
                     ),
@@ -528,8 +706,8 @@ class _RoutesPageState extends State<RoutesPage> {
               ),
             ),
             const SizedBox(height: 18),
-           
           ],
+        ),
         ),
       );
     },

@@ -1,5 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:convert';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
@@ -13,7 +19,146 @@ class DriversPage extends StatefulWidget {
   State<DriversPage> createState() => _DriversPageState();
 }
 
+class _DriverDailySummary {
+  _DriverDailySummary({
+    required this.date,
+    required this.driverName,
+    required this.vehicleName,
+    required this.vehicleType,
+  });
+
+  final DateTime date;
+  final String driverName;
+  final String vehicleName;
+  final String vehicleType;
+  int passengers = 0;
+  double fare = 0;
+}
+
 class _DriversPageState extends State<DriversPage> {
+  static final _namePattern = RegExp(r'^[A-Za-z]+(?: [A-Za-z]+)*$');
+  static final _moneyPattern = RegExp(r'^\d+(?:\.\d{1,2})?$');
+  static final _nameFormatters = [
+    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z ]')),
+  ];
+  static final _phoneFormatters = [FilteringTextInputFormatter.digitsOnly];
+  static final _moneyFormatters = [
+    TextInputFormatter.withFunction(
+      (oldValue, newValue) =>
+          RegExp(r'^\d*(?:\.\d{0,2})?$').hasMatch(newValue.text)
+          ? newValue
+          : oldValue,
+    ),
+  ];
+
+  String? _driverInputError(
+    TextEditingController first,
+    TextEditingController last,
+    TextEditingController contact,
+    TextEditingController salary,
+    TextEditingController quota,
+  ) {
+    if (!_namePattern.hasMatch(first.text.trim()) ||
+        !_namePattern.hasMatch(last.text.trim())) {
+      return 'First and last name must contain letters only.';
+    }
+    if (!RegExp(r'^\d{11}$').hasMatch(contact.text.trim())) {
+      return 'Contact number must be exactly 11 digits.';
+    }
+    if (!_moneyPattern.hasMatch(salary.text.trim()) ||
+        !_moneyPattern.hasMatch(quota.text.trim())) {
+      return 'Daily salary and daily quota must be non-negative numbers.';
+    }
+    return null;
+  }
+
+  final selectedDriverIds = <String>{};
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> tripStream =
+      FirebaseService.instance.watch('trips').asBroadcastStream();
+  int recentPage = 0;
+  static const recentPageSize = 8;
+  final dailySearchController = TextEditingController();
+  String dailySearch = '';
+  DateTime? dailyDate;
+  String dailyVehicleType = 'All types';
+  bool bulkSaving = false;
+
+  @override
+  void dispose() {
+    dailySearchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _bulkInactivateDrivers(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> drivers,
+  ) async {
+    final selected = drivers
+        .where(
+          (doc) =>
+              selectedDriverIds.contains(doc.id) &&
+              doc.data()['active'] != false,
+        )
+        .toList();
+    if (selected.isEmpty) return;
+    var reason = 'Resigned';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, refresh) => AlertDialog(
+          title: const Text('Inactivate selected drivers?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${selected.length} driver(s) will be marked inactive. Their history will remain.',
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: reason,
+                decoration: const InputDecoration(labelText: 'Reason'),
+                items: const [
+                  DropdownMenuItem(value: 'Resigned', child: Text('Resigned')),
+                  DropdownMenuItem(
+                    value: 'Terminated',
+                    child: Text('Terminated'),
+                  ),
+                ],
+                onChanged: (value) => refresh(() => reason = value ?? reason),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Inactivate'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => bulkSaving = true);
+    try {
+      final count = await FirebaseService.instance.bulkInactivate(
+        collection: 'drivers',
+        ids: selected.map((doc) => doc.id).toList(),
+        reason: reason,
+      );
+      if (mounted) {
+        setState(selectedDriverIds.clear);
+        _notice(context, '$count driver(s) marked $reason.');
+      }
+    } catch (error) {
+      if (mounted) _notice(context, 'Could not inactivate drivers: $error');
+    } finally {
+      if (mounted) setState(() => bulkSaving = false);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -40,6 +185,8 @@ class _DriversPageState extends State<DriversPage> {
     var vehicleId = data['vehicleId'] as String?;
     var active = data['active'] != false;
     var saving = false;
+    var photoChanged = false;
+    DriverPhoto? selectedPhoto;
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -51,15 +198,52 @@ class _DriversPageState extends State<DriversPage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  FormFieldBox('First name', controller: first),
+                  _DriverPhotoPicker(
+                    initialUrl: _driverPhotoSource(data),
+                    initialBytes: _driverPhotoBytes(data),
+                    onChanged: (photo) {
+                      photoChanged = true;
+                      selectedPhoto = photo;
+                    },
+                  ),
                   const SizedBox(height: 12),
-                  FormFieldBox('Last name', controller: last),
+                  FormFieldBox(
+                    'First name',
+                    controller: first,
+                    inputFormatters: _nameFormatters,
+                  ),
                   const SizedBox(height: 12),
-                  FormFieldBox('Contact number', controller: contact),
+                  FormFieldBox(
+                    'Last name',
+                    controller: last,
+                    inputFormatters: _nameFormatters,
+                  ),
                   const SizedBox(height: 12),
-                  FormFieldBox('Daily salary (PHP)', controller: salary),
+                  FormFieldBox(
+                    'Contact number',
+                    controller: contact,
+                    keyboardType: TextInputType.phone,
+                    maxLength: 11,
+                    inputFormatters: _phoneFormatters,
+                  ),
                   const SizedBox(height: 12),
-                  FormFieldBox('Target Money (PHP)', controller: quota),
+                  FormFieldBox(
+                    'Daily salary (PHP)',
+                    controller: salary,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    inputFormatters: _moneyFormatters,
+                  ),
+                  const SizedBox(height: 12),
+                  FormFieldBox(
+                    'Daily quota (PHP)',
+                    controller: quota,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    inputFormatters: _moneyFormatters,
+                  ),
                   const SizedBox(height: 12),
                   StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                     stream: FirebaseService.instance.watch('vehicles'),
@@ -127,9 +311,15 @@ class _DriversPageState extends State<DriversPage> {
               onPressed: saving
                   ? null
                   : () async {
-                      if (first.text.trim().isEmpty ||
-                          last.text.trim().isEmpty) {
-                        _notice(context, 'First and last name are required.');
+                      final inputError = _driverInputError(
+                        first,
+                        last,
+                        contact,
+                        salary,
+                        quota,
+                      );
+                      if (inputError != null) {
+                        _notice(context, inputError);
                         return;
                       }
                       final dailySalary = double.tryParse(salary.text.trim());
@@ -157,6 +347,14 @@ class _DriversPageState extends State<DriversPage> {
                           'vehicleId': vehicleId,
                           'active': active,
                         });
+                        if (photoChanged) {
+                          await FirebaseService.instance.updateDriverPhoto(
+                            driverId: id,
+                            photoBytes: selectedPhoto?.bytes,
+                            photoContentType:
+                                selectedPhoto?.contentType ?? 'image/jpeg',
+                          );
+                        }
                         if (dialogContext.mounted) {
                           Navigator.pop(dialogContext);
                         }
@@ -192,21 +390,51 @@ class _DriversPageState extends State<DriversPage> {
         salary = TextEditingController(text: '0'),
         quota = TextEditingController(text: '0');
     final vehicle = ValueNotifier<String?>('Unassigned');
+    DriverPhoto? selectedPhoto;
     showFormDialog(
       context,
       title: 'Register driver',
       action: 'Register driver',
       fields: [
+        _DriverPhotoPicker(onChanged: (photo) => selectedPhoto = photo),
         Row(
           children: [
-            Expanded(child: FormFieldBox('First name', controller: first)),
+            Expanded(
+              child: FormFieldBox(
+                'First name',
+                controller: first,
+                inputFormatters: _nameFormatters,
+              ),
+            ),
             const SizedBox(width: 12),
-            Expanded(child: FormFieldBox('Last name', controller: last)),
+            Expanded(
+              child: FormFieldBox(
+                'Last name',
+                controller: last,
+                inputFormatters: _nameFormatters,
+              ),
+            ),
           ],
         ),
-        FormFieldBox('Contact number', controller: contact),
-        FormFieldBox('Daily salary (PHP)', controller: salary),
-        FormFieldBox('Daily quota (PHP)', controller: quota),
+        FormFieldBox(
+          'Contact number',
+          controller: contact,
+          keyboardType: TextInputType.phone,
+          maxLength: 11,
+          inputFormatters: _phoneFormatters,
+        ),
+        FormFieldBox(
+          'Daily salary (PHP)',
+          controller: salary,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          inputFormatters: _moneyFormatters,
+        ),
+        FormFieldBox(
+          'Daily quota (PHP)',
+          controller: quota,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          inputFormatters: _moneyFormatters,
+        ),
         StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: FirebaseService.instance.watch('vehicles'),
           builder: (_, snapshot) => DropdownButtonFormField<String>(
@@ -235,8 +463,15 @@ class _DriversPageState extends State<DriversPage> {
         ),
       ],
       onSave: () async {
-        if (first.text.trim().isEmpty || last.text.trim().isEmpty) {
-          _notice(context, 'First name and last name are required.');
+        final inputError = _driverInputError(
+          first,
+          last,
+          contact,
+          salary,
+          quota,
+        );
+        if (inputError != null) {
+          _notice(context, inputError);
           return;
         }
         final dailySalary = double.tryParse(salary.text.trim());
@@ -251,22 +486,25 @@ class _DriversPageState extends State<DriversPage> {
           return;
         }
         try {
-          await FirebaseService.instance.addDriver({
-            'firstName': first.text.trim(),
-            'lastName': last.text.trim(),
-            'contactNumber': contact.text.trim(),
-            'vehicleId': vehicle.value == 'Unassigned' ? null : vehicle.value,
-            'dailySalary': dailySalary,
-            'targetMoney': targetMoney,
-            'trips': 0,
-            'earnings': 0.0,
-          });
+          await FirebaseService.instance.addDriver(
+            {
+              'firstName': first.text.trim(),
+              'lastName': last.text.trim(),
+              'contactNumber': contact.text.trim(),
+              'vehicleId': vehicle.value == 'Unassigned' ? null : vehicle.value,
+              'dailySalary': dailySalary,
+              'targetMoney': targetMoney,
+              'trips': 0,
+            },
+            photoBytes: selectedPhoto?.bytes,
+            photoContentType: selectedPhoto?.contentType ?? 'image/jpeg',
+          );
           if (context.mounted) {
             _notice(context, 'Driver registered.');
           }
-        } on FirebaseException catch (error) {
+        } catch (error) {
           if (context.mounted) {
-            _notice(context, 'Firebase ${error.code}: ${error.message}');
+            _notice(context, '$error');
           }
         }
       },
@@ -286,7 +524,7 @@ class _DriversPageState extends State<DriversPage> {
       if (driverSnapshot.hasError) {
         return Center(
           child: Text(
-            'Could not load drivers from Firebase.\n${driverSnapshot.error}',
+            'Could not load drivers from the server.\n${driverSnapshot.error}',
           ),
         );
       }
@@ -294,9 +532,10 @@ class _DriversPageState extends State<DriversPage> {
       final drivers = allDrivers
           .where((doc) => doc.data()['archived'] != true)
           .toList();
-      final totalTrips = drivers.fold<int>(
-        0,
-        (total, doc) => total + ((doc.data()['trips'] as num?)?.toInt() ?? 0),
+      selectedDriverIds.removeWhere(
+        (id) => !drivers.any(
+          (doc) => doc.id == id && doc.data()['active'] != false,
+        ),
       );
       final totalSalary = drivers.fold<double>(
         0,
@@ -314,11 +553,26 @@ class _DriversPageState extends State<DriversPage> {
           children: [
             PageIntro(
               title: 'Drivers',
-              subtitle: 'Driver records and performance from Firebase.',
-              action: FilledButton.icon(
-                onPressed: () => _register(context),
-                icon: const Icon(Icons.person_add_alt_1),
-                label: const Text('Register driver'),
+              subtitle: 'Driver records and performance from the server.',
+              action: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: bulkSaving || selectedDriverIds.isEmpty
+                        ? null
+                        : () => _bulkInactivateDrivers(drivers),
+                    icon: const Icon(Icons.person_off_outlined),
+                    label: Text(
+                      'Inactivate selected (${selectedDriverIds.length})',
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => _register(context),
+                    icon: const Icon(Icons.person_add_alt_1),
+                    label: const Text('Register driver'),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 22),
@@ -333,10 +587,23 @@ class _DriversPageState extends State<DriversPage> {
                 ),
                 const SizedBox(width: 16),
                 Expanded(
-                  child: _Metric(
-                    'TOTAL TRIPS',
-                    '$totalTrips',
-                    Icons.route_outlined,
+                  child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: tripStream,
+                    builder: (context, snapshot) {
+                      final ids = drivers.map((driver) => driver.id).toSet();
+                      final count = (snapshot.data?.docs ?? [])
+                          .where(
+                            (trip) =>
+                                ids.contains(trip.data()['driverId']) &&
+                                trip.data()['boardedAt'] is Timestamp,
+                          )
+                          .length;
+                      return _Metric(
+                        'TOTAL FARES',
+                        '$count',
+                        Icons.route_outlined,
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(width: 16),
@@ -393,7 +660,20 @@ class _DriversPageState extends State<DriversPage> {
                     else
                       for (final driver in drivers)
                         _DriverRow(
+                          driverId: driver.id,
+                          tripStream: tripStream,
                           data: driver.data(),
+                          selected: selectedDriverIds.contains(driver.id),
+                          onSelected:
+                              driver.data()['active'] != false && !bulkSaving
+                              ? (value) => setState(() {
+                                  if (value == true) {
+                                    selectedDriverIds.add(driver.id);
+                                  } else {
+                                    selectedDriverIds.remove(driver.id);
+                                  }
+                                })
+                              : null,
                           onEdit: () =>
                               _edit(context, driver.id, driver.data()),
                           onCompute: () => showDialog<void>(
@@ -443,9 +723,80 @@ class _DriversPageState extends State<DriversPage> {
             ),
             const SizedBox(height: 18),
             StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              stream: FirebaseService.instance.watch('trips'),
+              stream: tripStream,
               builder: (context, tripSnapshot) {
-                final trips = tripSnapshot.data?.docs ?? [];
+                final summaries = <String, _DriverDailySummary>{};
+                for (final trip
+                    in tripSnapshot.data?.docs ??
+                        <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+                  final data = trip.data();
+                  final boardedAt = data['boardedAt'];
+                  final driverId = '${data['driverId'] ?? ''}'.trim();
+                  if (boardedAt is! Timestamp || driverId.isEmpty) continue;
+                  final boarded = boardedAt.toDate().toLocal();
+                  final date = DateTime(
+                    boarded.year,
+                    boarded.month,
+                    boarded.day,
+                  );
+                  final vehicleId = '${data['vehicleId'] ?? ''}'.trim();
+                  final key =
+                      '${date.year}-${date.month}-${date.day}|$driverId|$vehicleId';
+                  final summary = summaries.putIfAbsent(
+                    key,
+                    () => _DriverDailySummary(
+                      date: date,
+                      driverName: '${data['driverName'] ?? 'Unknown driver'}',
+                      vehicleName:
+                          '${data['vehicleName'] ?? 'Unknown vehicle'}',
+                      vehicleType: '${data['vehicleType'] ?? 'Unknown'}',
+                    ),
+                  );
+                  summary.passengers +=
+                      (data['passengerCount'] as num?)?.toInt() ?? 1;
+                  summary.fare += (data['fare'] as num?)?.toDouble() ?? 0;
+                }
+                final types =
+                    summaries.values
+                        .map((row) => row.vehicleType)
+                        .toSet()
+                        .toList()
+                      ..sort();
+                final selectedType = types.contains(dailyVehicleType)
+                    ? dailyVehicleType
+                    : 'All types';
+                final query = dailySearch.trim().toLowerCase();
+                final rows =
+                    summaries.values.where((row) {
+                      if (dailyDate != null &&
+                          (row.date.year != dailyDate!.year ||
+                              row.date.month != dailyDate!.month ||
+                              row.date.day != dailyDate!.day))
+                        return false;
+                      if (selectedType != 'All types' &&
+                          row.vehicleType != selectedType)
+                        return false;
+                      if (query.isNotEmpty &&
+                          !row.driverName.toLowerCase().contains(query) &&
+                          !row.vehicleName.toLowerCase().contains(query))
+                        return false;
+                      return true;
+                    }).toList()..sort((a, b) {
+                      final byDate = b.date.compareTo(a.date);
+                      return byDate != 0
+                          ? byDate
+                          : a.driverName.compareTo(b.driverName);
+                    });
+                final pageCount =
+                    (rows.length + recentPageSize - 1) ~/ recentPageSize;
+                final page = pageCount == 0
+                    ? 0
+                    : recentPage.clamp(0, pageCount - 1);
+                final pageRows = rows
+                    .skip(page * recentPageSize)
+                    .take(recentPageSize);
+                String dateLabel(DateTime date) =>
+                    '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
                 return Card(
                   child: Padding(
                     padding: const EdgeInsets.all(20),
@@ -453,44 +804,151 @@ class _DriversPageState extends State<DriversPage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Recent driver trips',
+                          'Daily driver summary',
                           style: TextStyle(
                             fontSize: 17,
                             fontWeight: FontWeight.w800,
                           ),
                         ),
                         const SizedBox(height: 12),
-                        if (trips.isEmpty)
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 250,
+                              child: TextField(
+                                controller: dailySearchController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Search',
+                                  hintText: 'Driver or vehicle',
+                                  prefixIcon: Icon(Icons.search),
+                                ),
+                                onChanged: (value) => setState(() {
+                                  dailySearch = value;
+                                  recentPage = 0;
+                                }),
+                              ),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                final picked = await showDatePicker(
+                                  context: context,
+                                  initialDate: dailyDate ?? DateTime.now(),
+                                  firstDate: DateTime(2020),
+                                  lastDate: DateTime.now(),
+                                );
+                                if (picked != null && mounted) {
+                                  setState(() {
+                                    dailyDate = picked;
+                                    recentPage = 0;
+                                  });
+                                }
+                              },
+                              icon: const Icon(Icons.calendar_today_outlined),
+                              label: Text(
+                                dailyDate == null
+                                    ? 'All dates'
+                                    : dateLabel(dailyDate!),
+                              ),
+                            ),
+                            if (dailyDate != null)
+                              IconButton(
+                                tooltip: 'Clear date filter',
+                                onPressed: () => setState(() {
+                                  dailyDate = null;
+                                  recentPage = 0;
+                                }),
+                                icon: const Icon(Icons.close),
+                              ),
+                            SizedBox(
+                              width: 170,
+                              child: DropdownButtonFormField<String>(
+                                key: ValueKey(dailyVehicleType),
+                                initialValue: selectedType,
+                                decoration: const InputDecoration(
+                                  labelText: 'Vehicle type',
+                                ),
+                                items: [
+                                  const DropdownMenuItem(
+                                    value: 'All types',
+                                    child: Text('All types'),
+                                  ),
+                                  for (final type in types)
+                                    DropdownMenuItem(
+                                      value: type,
+                                      child: Text(type),
+                                    ),
+                                ],
+                                onChanged: (value) => setState(() {
+                                  dailyVehicleType = value ?? 'All types';
+                                  recentPage = 0;
+                                }),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        if (rows.isEmpty)
                           const Padding(
                             padding: EdgeInsets.symmetric(vertical: 24),
                             child: Text(
-                              'No trips recorded in Firebase.',
-                              style: TextStyle(color: Colors.black45),
+                              'No daily driver records match the filters.',
                             ),
                           )
-                        else
-                          for (final trip in trips.take(8))
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: const CircleAvatar(
-                                child: Icon(Icons.route),
-                              ),
-                              title: Text(
-                                '${trip.data()['routeName'] ?? 'Trip'}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              subtitle: Text(
-                                '${trip.data()['driverName'] ?? 'Unassigned'} • ${trip.data()['vehicleName'] ?? 'No vehicle'}',
-                              ),
-                              trailing: Text(
-                                'PHP ${trip.data()['income'] ?? 0}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
+                        else ...[
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: DataTable(
+                              columns: const [
+                                DataColumn(label: Text('DATE')),
+                                DataColumn(label: Text('VEHICLE')),
+                                DataColumn(label: Text('DRIVER')),
+                                DataColumn(label: Text('PASSENGERS CARRIED')),
+                                DataColumn(label: Text('FARE COLLECTED')),
+                              ],
+                              rows: [
+                                for (final row in pageRows)
+                                  DataRow(
+                                    cells: [
+                                      DataCell(Text(dateLabel(row.date))),
+                                      DataCell(Text(row.vehicleName)),
+                                      DataCell(Text(row.driverName)),
+                                      DataCell(Text('${row.passengers}')),
+                                      DataCell(
+                                        Text(
+                                          'PHP ${row.fare.toStringAsFixed(2)}',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                              ],
                             ),
+                          ),
+                          Row(
+                            children: [
+                              Text(
+                                'Page ${page + 1} of $pageCount • ${rows.length} daily records',
+                              ),
+                              const Spacer(),
+                              IconButton(
+                                onPressed: page > 0
+                                    ? () =>
+                                          setState(() => recentPage = page - 1)
+                                    : null,
+                                icon: const Icon(Icons.chevron_left),
+                              ),
+                              IconButton(
+                                onPressed: page + 1 < pageCount
+                                    ? () =>
+                                          setState(() => recentPage = page + 1)
+                                    : null,
+                                icon: const Icon(Icons.chevron_right),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -545,14 +1003,207 @@ class _Metric extends StatelessWidget {
   );
 }
 
+typedef DriverPhoto = ({Uint8List bytes, String contentType});
+
+String _driverPhotoSource(Map<String, dynamic> data) {
+  final url = '${data['photoUrl'] ?? ''}'.trim();
+  return url.isNotEmpty ? url : '${data['photoPath'] ?? ''}'.trim();
+}
+
+Uint8List? _driverPhotoBytes(Map<String, dynamic> data) {
+  final encoded = data['photoBase64'];
+  if (encoded is! String || encoded.isEmpty) return null;
+  try {
+    return base64Decode(encoded);
+  } on FormatException {
+    return null;
+  }
+}
+
+Widget _driverPhotoDisplay({
+  required String source,
+  required Uint8List? bytes,
+  required double iconSize,
+}) {
+  if (bytes != null) return Image.memory(bytes, fit: BoxFit.cover);
+  if (source.startsWith('http')) {
+    return Image.network(
+      source,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => Icon(Icons.person, size: iconSize),
+    );
+  }
+  if (source.isNotEmpty) {
+    return _StoredDriverPhoto(path: source, iconSize: iconSize);
+  }
+  return Icon(Icons.person, size: iconSize, color: const Color(0xFF08783E));
+}
+
+class _StoredDriverPhoto extends StatelessWidget {
+  const _StoredDriverPhoto({required this.path, required this.iconSize});
+
+  final String path;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Uint8List?>(
+    future: FirebaseStorage.instance.ref(path).getData(5 * 1024 * 1024),
+    builder: (context, snapshot) {
+      final bytes = snapshot.data;
+      if (bytes != null) return Image.memory(bytes, fit: BoxFit.cover);
+      return Icon(Icons.person, size: iconSize, color: const Color(0xFF08783E));
+    },
+  );
+}
+
+class _DriverPhotoPicker extends StatefulWidget {
+  const _DriverPhotoPicker({
+    this.initialUrl = '',
+    this.initialBytes,
+    required this.onChanged,
+  });
+
+  final String initialUrl;
+  final Uint8List? initialBytes;
+  final ValueChanged<DriverPhoto?> onChanged;
+
+  @override
+  State<_DriverPhotoPicker> createState() => _DriverPhotoPickerState();
+}
+
+class _DriverPhotoPickerState extends State<_DriverPhotoPicker> {
+  DriverPhoto? selected;
+  bool removed = false;
+  bool picking = false;
+  String? error;
+
+  Future<void> _pick() async {
+    setState(() {
+      picking = true;
+      error = null;
+    });
+    try {
+      final file = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
+        requestFullMetadata: false,
+      );
+      if (file == null || !mounted) return;
+      final bytes = await file.readAsBytes();
+      if (bytes.length > 5 * 1024 * 1024) {
+        setState(() => error = 'Choose an image smaller than 5 MB.');
+        return;
+      }
+      final extension = file.name.toLowerCase().split('.').last;
+      final contentType =
+          file.mimeType ??
+          switch (extension) {
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'gif' => 'image/gif',
+            _ => 'image/jpeg',
+          };
+      if (!contentType.startsWith('image/')) {
+        setState(() => error = 'Choose an image file.');
+        return;
+      }
+      setState(() {
+        selected = (bytes: bytes, contentType: contentType);
+        removed = false;
+      });
+      widget.onChanged(selected);
+    } catch (exception) {
+      if (mounted) setState(() => error = 'Could not read image: $exception');
+    } finally {
+      if (mounted) setState(() => picking = false);
+    }
+  }
+
+  void _remove() {
+    setState(() {
+      selected = null;
+      removed = true;
+      error = null;
+    });
+    widget.onChanged(null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = widget.initialUrl.trim();
+    final hasImage =
+        selected != null ||
+        (!removed && (widget.initialBytes != null || imageUrl.isNotEmpty));
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 34,
+          backgroundColor: const Color(0xFFE7F2EA),
+          child: ClipOval(
+            child: SizedBox.square(
+              dimension: 68,
+              child: selected != null
+                  ? Image.memory(selected!.bytes, fit: BoxFit.cover)
+                  : hasImage
+                  ? _driverPhotoDisplay(
+                      source: imageUrl,
+                      bytes: widget.initialBytes,
+                      iconSize: 36,
+                    )
+                  : const Icon(
+                      Icons.person,
+                      size: 36,
+                      color: Color(0xFF08783E),
+                    ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              OutlinedButton.icon(
+                onPressed: picking ? null : _pick,
+                icon: picking
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.photo_outlined),
+                label: Text(hasImage ? 'Change photo' : 'Attach photo'),
+              ),
+              if (hasImage)
+                TextButton.icon(
+                  onPressed: picking ? null : _remove,
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('Remove photo'),
+                ),
+              if (error != null)
+                Text(
+                  error!,
+                  style: const TextStyle(color: Colors.red, fontSize: 12),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _DriverHeader extends StatelessWidget {
   const _DriverHeader();
   @override
   Widget build(BuildContext context) => const Row(
     children: [
+      SizedBox(width: 48),
       Expanded(flex: 2, child: Text('DRIVER', style: _head)),
+      Expanded(child: Text('STATUS', style: _head)),
       Expanded(child: Text('VEHICLE', style: _head)),
-      Expanded(child: Text('EARNINGS', style: _head)),
+      Expanded(child: Text('REVENUE TODAY', style: _head)),
       Expanded(child: Text('DAILY SALARY', style: _head)),
       Expanded(child: Text('TARGET MONEY', style: _head)),
       SizedBox(width: 120),
@@ -562,12 +1213,20 @@ class _DriverHeader extends StatelessWidget {
 
 class _DriverRow extends StatelessWidget {
   const _DriverRow({
+    required this.driverId,
+    required this.tripStream,
     required this.data,
+    required this.selected,
+    required this.onSelected,
     required this.onEdit,
     required this.onCompute,
     required this.onArchive,
   });
   final Map<String, dynamic> data;
+  final String driverId;
+  final Stream<QuerySnapshot<Map<String, dynamic>>> tripStream;
+  final bool selected;
+  final ValueChanged<bool?>? onSelected;
   final VoidCallback onEdit;
   final VoidCallback onCompute;
   final VoidCallback onArchive;
@@ -576,18 +1235,74 @@ class _DriverRow extends StatelessWidget {
     padding: const EdgeInsets.symmetric(vertical: 13),
     child: Row(
       children: [
+        SizedBox(
+          width: 48,
+          child: Checkbox(value: selected, onChanged: onSelected),
+        ),
         Expanded(
           flex: 2,
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: const Color(0xFFE7F2EA),
+                child: ClipOval(
+                  child: SizedBox.square(
+                    dimension: 36,
+                    child: _driverPhotoDisplay(
+                      source: _driverPhotoSource(data),
+                      bytes: _driverPhotoBytes(data),
+                      iconSize: 21,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '${data['firstName'] ?? ''} ${data['lastName'] ?? ''}'.trim(),
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
           child: Text(
-            '${data['firstName'] ?? ''} ${data['lastName'] ?? ''}'.trim(),
-            style: const TextStyle(fontWeight: FontWeight.w700),
+            data['active'] != false
+                ? 'Active'
+                : '${data['inactiveReason'] ?? 'Inactive'}',
           ),
         ),
         Expanded(child: Text('${data['vehicleName'] ?? 'Unassigned'}')),
         Expanded(
-          child: Text(
-            'PHP ${data['earnings'] ?? 0}',
-            style: const TextStyle(fontWeight: FontWeight.w700),
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: tripStream,
+            builder: (context, snapshot) {
+              final total = (snapshot.data?.docs ?? []).fold<double>(0, (
+                sum,
+                trip,
+              ) {
+                final row = trip.data();
+                final boarded = row['boardedAt'];
+                final date = boarded is Timestamp
+                    ? boarded.toDate().toLocal()
+                    : null;
+                final now = DateTime.now();
+                return row['driverId'] == driverId &&
+                        date != null &&
+                        date.year == now.year &&
+                        date.month == now.month &&
+                        date.day == now.day
+                    ? sum + ((row['fare'] as num?)?.toDouble() ?? 0)
+                    : sum;
+              });
+              return Text(
+                'PHP ${total.toStringAsFixed(2)}',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              );
+            },
           ),
         ),
         Expanded(child: Text('PHP ${data['dailySalary'] ?? 0}')),

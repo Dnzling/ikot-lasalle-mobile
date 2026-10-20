@@ -1,70 +1,42 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClientSecureBearSSL.h>
+#include <LittleFS.h>
 #include <SoftwareSerial.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <sys/time.h>
+#include <memory>
+#include <new>
+#include <bearssl/bearssl.h>
+
+
+
+
+// Arduino IDE generates .ino function prototypes before the definitions below.
+// Forward-declare these types so those generated prototypes can compile.
+enum class CloudStatus : uint8_t;
+struct GpsCacheRecord;
+
+
+
 
 // =====================================================
-// WIFI
+// SIM808 GPRS relay configuration
 // =====================================================
-// Configure these locally before flashing. Do not commit real passwords.
-const char* WIFI_SSID     = "Niger A25";
-const char* WIFI_PASSWORD = "PepegaDevotion09165242783";
-
-// Firebase Authentication > Users: create a dedicated email/password account
-// for this physical Jeep tracker. Use the WEB API key from firebase_options.dart.
-const char* FIREBASE_API_KEY = "AIzaSyC0YXQ83GCutpozyK2wi0B3vH8V2zKt5IQ";
-// Both trackers may use the same dedicated Firebase Authentication account.
-// VEHICLE_DOCUMENT_ID below determines which vehicle each board updates.
-const char* FIREBASE_DEVICE_EMAIL = "jeeplasalle@email.com";
-const char* FIREBASE_DEVICE_PASSWORD = "jeeplasalle1";
+// Set RELAY_HOST to the public relay host, and use the same private 64-byte
+// hex key as the server. Never commit the real key.
+const char* SIM_APN = "internet";  // Smart
+// Installed Smart SIM: 09477589845. The number is for device identification;
+// the modem reads the actual subscriber identity from its inserted SIM.
+const char* RELAY_HOST = "77dab05d41e8f4.lhr.life";
+const uint16_t RELAY_PORT = 80;
+const char* RELAY_KEY_HEX = "825ea26ec6cc8f5294d1a2a3e5edbce61a2f5cb05da133d001a81de0cfc92b3711afa10eed313562df695b9f0be132cdb788a76fc9750c72df1ac2f008931bed";
 // Copy the document ID (not the vehicle name) from Firestore > vehicles.
-const char* VEHICLE_DOCUMENT_ID = "fVzHxxqNmYGYKd5gxmqi";
-const char* FIREBASE_PROJECT_ID = "ikot-lasalle-ccfab";
+const char* VEHICLE_DOCUMENT_ID = "CuoxcUom2JLXRq4qu33L";
+const char* VEHICLE_TYPE = "Jeep";
 
-// Download the PEM for the CA that currently validates both Google API hosts
-// from its official issuer, and paste it here before using this in production.
-// Fail closed rather than sending Firebase credentials over unverified TLS.
-const char* FIREBASE_ROOT_CA = R"EOF(-----BEGIN CERTIFICATE-----
-MIIFVzCCAz+gAwIBAgINAgPlk28xsBNJiGuiFzANBgkqhkiG9w0BAQwFADBHMQsw
-CQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEU
-MBIGA1UEAxMLR1RTIFJvb3QgUjEwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAw
-MDAwWjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZp
-Y2VzIExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjEwggIiMA0GCSqGSIb3DQEBAQUA
-A4ICDwAwggIKAoICAQC2EQKLHuOhd5s73L+UPreVp0A8of2C+X0yBoJx9vaMf/vo
-27xqLpeXo4xL+Sv2sfnOhB2x+cWX3u+58qPpvBKJXqeqUqv4IyfLpLGcY9vXmX7w
-Cl7raKb0xlpHDU0QM+NOsROjyBhsS+z8CZDfnWQpJSMHobTSPS5g4M/SCYe7zUjw
-TcLCeoiKu7rPWRnWr4+wB7CeMfGCwcDfLqZtbBkOtdh+JhpFAz2weaSUKK0Pfybl
-qAj+lug8aJRT7oM6iCsVlgmy4HqMLnXWnOunVmSPlk9orj2XwoSPwLxAwAtcvfaH
-szVsrBhQf4TgTM2S0yDpM7xSma8ytSmzJSq0SPly4cpk9+aCEI3oncKKiPo4Zor8
-Y/kB+Xj9e1x3+naH+uzfsQ55lVe0vSbv1gHR6xYKu44LtcXFilWr06zqkUspzBmk
-MiVOKvFlRNACzqrOSbTqn3yDsEB750Orp2yjj32JgfpMpf/VjsPOS+C12LOORc92
-wO1AK/1TD7Cn1TsNsYqiA94xrcx36m97PtbfkSIS5r762DL8EGMUUXLeXdYWk70p
-aDPvOmbsB4om3xPXV2V4J95eSRQAogB/mqghtqmxlbCluQ0WEdrHbEg8QOB+DVrN
-VjzRlwW5y0vtOUucxD/SVRNuJLDWcfr0wbrM7Rv1/oFB2ACYPTrIrnqYNxgFlQID
-AQABo0IwQDAOBgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4E
-FgQU5K8rJnEaK0gnhS9SZizv8IkTcT4wDQYJKoZIhvcNAQEMBQADggIBAJ+qQibb
-C5u+/x6Wki4+omVKapi6Ist9wTrYggoGxval3sBOh2Z5ofmmWJyq+bXmYOfg6LEe
-QkEzCzc9zolwFcq1JKjPa7XSQCGYzyI0zzvFIoTgxQ6KfF2I5DUkzps+GlQebtuy
-h6f88/qBVRRiClmpIgUxPoLW7ttXNLwzldMXG+gnoot7TiYaelpkttGsN/H9oPM4
-7HLwEXWdyzRSjeZ2axfG34arJ45JK3VmgRAhpuo+9K4l/3wV3s6MJT/KYnAK9y8J
-ZgfIPxz88NtFMN9iiMG1D53Dn0reWVlHxYciNuaCp+0KueIHoI17eko8cdLiA6Ef
-MgfdG+RCzgwARWGAtQsgWSl4vflVy2PFPEz0tv/bal8xa5meLMFrUKTX5hgUvYU/
-Z6tGn6D/Qqc6f1zLXbBwHSs09dR2CQzreExZBfMzQsNhFRAbd03OIozUhfJFfbdT
-6u9AWpQKXCBfTkBdYiJ23//OYb2MI3jSNwLgjt7RETeJ9r/tSQdirpLsQBqvFAnZ
-0E6yove+7u7Y/9waLd64NnHi/Hm3lCXRSHNboTXns5lndcEZOitHTtNCjv0xyBZm
-2tIMPNuzjsmhDYAPexZ3FL//2wmUspO8IFgV6dtxQ/PeEMMA3KgqlbbC1j+Qa3bb
-bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c
------END CERTIFICATE-----)EOF";
 
-String firebaseIdToken;
-unsigned long firebaseTokenIssuedAt = 0;
-unsigned long firebaseTokenLifetimeMs = 0;
-unsigned long lastFirebaseAuthAttempt = 0;
-const unsigned long FIREBASE_AUTH_RETRY_MS = 30000;
+
 
 // =====================================================
 // CONNECTIONS
@@ -78,10 +50,19 @@ const unsigned long FIREBASE_AUTH_RETRY_MS = 30000;
 // SIM808 RXD -> NodeMCU D7 / GPIO13
 // SIM808 GND -> NodeMCU GND
 
+
+
+
 #define SIM808_RX D6
 #define SIM808_TX D7
 
+
+
+
 SoftwareSerial sim808(SIM808_RX, SIM808_TX);
+
+
+
 
 // =====================================================
 // LIBRARY-FREE I2C LCD
@@ -90,10 +71,16 @@ SoftwareSerial sim808(SIM808_RX, SIM808_TX);
 #define LCD_COLUMNS 20
 #define LCD_ROWS 4
 
+
+
+
 class SimpleI2CLCD {
 private:
   uint8_t address;
   uint8_t backlight = 0x08;
+
+
+
 
   void expanderWrite(uint8_t data) {
     Wire.beginTransmission(address);
@@ -101,56 +88,101 @@ private:
     Wire.endTransmission();
   }
 
+
+
+
   void pulseEnable(uint8_t data) {
     expanderWrite(data | 0x04);
     delayMicroseconds(1);
 
+
+
+
     expanderWrite(data & ~0x04);
     delayMicroseconds(50);
   }
+
+
+
 
   void write4Bits(uint8_t data) {
     expanderWrite(data);
     pulseEnable(data);
   }
 
+
+
+
   void send(uint8_t value, uint8_t mode) {
     uint8_t highNibble = value & 0xF0;
     uint8_t lowNibble = (value << 4) & 0xF0;
 
+
+
+
     write4Bits(highNibble | mode);
     write4Bits(lowNibble | mode);
   }
+
+
+
 
 public:
   SimpleI2CLCD(uint8_t lcdAddress) {
     address = lcdAddress;
   }
 
+
+
+
   void command(uint8_t value) {
     send(value, 0x00);
   }
+
+
+
 
   void writeCharacter(uint8_t value) {
     send(value, 0x01);
   }
 
+
+
+
   void begin() {
     delay(50);
+
+
+
 
     expanderWrite(0x00);
     delay(1000);
 
-    write4Bits(0x30);
-    delayMicroseconds(4500);
+
+
 
     write4Bits(0x30);
     delayMicroseconds(4500);
+
+
+
+
+    write4Bits(0x30);
+    delayMicroseconds(4500);
+
+
+
 
     write4Bits(0x30);
     delayMicroseconds(150);
 
+
+
+
     write4Bits(0x20);
+
+
+
 
     command(0x28);
     command(0x08);
@@ -159,22 +191,37 @@ public:
     command(0x0C);
   }
 
+
+
+
   void clear() {
     command(0x01);
     delay(2);
   }
+
+
+
 
   void setCursor(uint8_t column, uint8_t row) {
     const uint8_t rowOffsets[] = {
       0x00, 0x40, 0x14, 0x54
     };
 
+
+
+
     if (row >= LCD_ROWS) {
       row = LCD_ROWS - 1;
     }
 
+
+
+
     command(0x80 | (column + rowOffsets[row]));
   }
+
+
+
 
   void print(const String& text) {
     for (unsigned int i = 0; i < text.length(); i++) {
@@ -183,16 +230,34 @@ public:
   }
 };
 
+
+
+
 SimpleI2CLCD lcd(LCD_ADDRESS);
+
+
+
 
 // =====================================================
 // JEEPNEY INFORMATION
 // =====================================================
-const String VEHICLE_TYPE = "E-Jeep";
-
 int onboardCount = 0;
-int outboardCount = 0;
-int expectedOffCount = 0;
+int expectedOffboardingCount = 0;
+String dbVehicleType = "--";
+String dbVehicleStatus = "";
+String dbLocationLabel = "";
+bool vehicleDataLoaded = false;
+
+
+extern double gpsLatitude;
+extern double gpsLongitude;
+extern double gpsSpeedKmh;
+extern bool gpsHasFix;
+extern bool gpsCoordinatesAvailable;
+
+
+
+
 struct RouteStop {
   String id;
   String name;
@@ -200,14 +265,247 @@ struct RouteStop {
   double longitude;
   double radius;
 };
+
+
+
+
 RouteStop routeStops[30];
 int routeStopCount = 0;
 int currentStopIndex = -1;
-bool stopTransitionPending = false;
-unsigned long stopEnteredAt = 0;
+bool routeMovingTowardLastStop = true;
+void saveRouteDirection() {
+  File file = LittleFS.open("/route_direction.state", "w");
+  if (file) { file.write(routeMovingTowardLastStop ? '1' : '0'); file.close(); }
+}
+void loadRouteDirection() {
+  File file = LittleFS.open("/route_direction.state", "r");
+  if (file) { routeMovingTowardLastStop = file.read() == '1'; file.close(); }
+}
+bool routeOnCampus = false;
+String latestGpsSpeedText = "SPEED: --";
+String latestGpsEtaText = "ETA: --";
 
-String jeepneyStatus = "STARTING";
-String vehicleStatus = "IDLE";
+
+struct FuelingGate {
+  double latitude;
+  double longitude;
+  double radius;
+};
+
+FuelingGate fuelingEntrance = {};
+FuelingGate fuelingExit = {};
+bool fuelingLocationsLoaded = false;
+bool fuelingTripActive = false;
+
+
+double distanceMeters(double latitude1, double longitude1,
+                      double latitude2, double longitude2);
+
+
+
+
+bool isFuelingTripActive() {
+  return fuelingTripActive;
+}
+
+void loadFuelingTripState() {
+  File file = LittleFS.open("/fueling.state", "r");
+  if (!file) return;
+  fuelingTripActive = file.read() == '1';
+  file.close();
+}
+
+void updateFuelingTripState() {
+  if (!gpsHasFix || !fuelingLocationsLoaded) return;
+  // Entrance wins if the configured radii overlap.
+  const bool atEntrance = distanceMeters(gpsLatitude, gpsLongitude,
+      fuelingEntrance.latitude, fuelingEntrance.longitude) <= fuelingEntrance.radius;
+  const bool atExit = distanceMeters(gpsLatitude, gpsLongitude,
+      fuelingExit.latitude, fuelingExit.longitude) <= fuelingExit.radius;
+  const bool nextState = atEntrance ? false : atExit ? true : fuelingTripActive;
+  if (nextState == fuelingTripActive) return;
+  fuelingTripActive = nextState;
+  File file = LittleFS.open("/fueling.state", "w");
+  if (file) {
+    file.write(fuelingTripActive ? '1' : '0');
+    file.close();
+  }
+  Serial.println(fuelingTripActive ? "Fueling trip started at exit gate" :
+      "Fueling trip ended at entrance gate");
+}
+
+
+
+
+String getRouteStopName(int index) {
+  if (index < 0 || index >= routeStopCount) return "--";
+  return routeStops[index].name;
+}
+
+
+
+
+String getLocationDisplayText() {
+  if (!gpsHasFix) {
+    return gpsCoordinatesAvailable ? "LOC: LAST FIX" : "LOC: NO GPS";
+  }
+
+
+  if (isFuelingTripActive()) return "LOC: FUELING GAS";
+
+
+  if (!routeOnCampus) {
+    return "LOC: OUTSIDE";
+  }
+
+
+  return currentStopIndex >= 0
+      ? String("LOC: ") + routeStops[currentStopIndex].name
+      : "LOC: CAMPUS";
+}
+
+
+
+
+int getEtaTargetStopIndex() {
+  if ((!gpsHasFix && !gpsCoordinatesAvailable) || routeStopCount == 0) {
+    return -1;
+  }
+
+
+  int nearestIndex = -1;
+  double nearestDistance = 1e9;
+
+
+  for (int i = 0; i < routeStopCount; ++i) {
+    const double distance = distanceMeters(
+        gpsLatitude, gpsLongitude,
+        routeStops[i].latitude,
+        routeStops[i].longitude);
+
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = i;
+    }
+  }
+
+
+  if (nearestIndex < 0) return -1;
+
+  if (currentStopIndex == nearestIndex && routeStopCount > 1) {
+    const int next = nearestIndex + (routeMovingTowardLastStop ? 1 : -1);
+    if (next >= 0 && next < routeStopCount) return next;
+  }
+
+
+  int gate1Index = -1;
+  int gate3Index = -1;
+  for (int i = 0; i < routeStopCount; ++i) {
+    if (routeStops[i].id == "gate_1" || routeStops[i].name == "Gate 1") {
+      gate1Index = i;
+    }
+    if (routeStops[i].id == "gate_3" || routeStops[i].name == "Gate 3") {
+      gate3Index = i;
+    }
+  }
+
+
+  if (!routeOnCampus && gate1Index >= 0 && gate3Index >= 0) {
+    const double gate1Distance = distanceMeters(
+        gpsLatitude, gpsLongitude,
+        routeStops[gate1Index].latitude,
+        routeStops[gate1Index].longitude);
+    const double gate3Distance = distanceMeters(
+        gpsLatitude, gpsLongitude,
+        routeStops[gate3Index].latitude,
+        routeStops[gate3Index].longitude);
+    return gate1Distance <= gate3Distance ? gate1Index : gate3Index;
+  }
+
+
+  // Follow every stop in order and reverse at each gate endpoint.
+  const int step = routeMovingTowardLastStop ? 1 : -1;
+  const int targetIndex = nearestIndex + step;
+  if (targetIndex < 0 || targetIndex >= routeStopCount) return nearestIndex;
+  return targetIndex;
+}
+
+
+
+
+String getEstimatedArrivalText() {
+  if ((!gpsHasFix && !gpsCoordinatesAvailable) || routeStopCount == 0) {
+    return "ETA: --";
+  }
+
+
+  const int targetIndex = getEtaTargetStopIndex();
+  if (targetIndex < 0) {
+    return "ETA: --";
+  }
+
+
+  const RouteStop& target = routeStops[targetIndex];
+  const double distanceMetersToTarget = distanceMeters(
+      gpsLatitude, gpsLongitude,
+      target.latitude,
+      target.longitude);
+
+
+  double estimatedSpeedKmh = gpsSpeedKmh > 0.0 ? gpsSpeedKmh : 8.0;
+  if (estimatedSpeedKmh < 1.0) estimatedSpeedKmh = 1.0;
+
+
+  const double etaSeconds =
+      (distanceMetersToTarget / 1000.0) / estimatedSpeedKmh * 3600.0;
+  int etaTotalSeconds = (int)round(etaSeconds);
+  if (etaTotalSeconds < 1) etaTotalSeconds = 1;
+
+
+  String targetName = target.name;
+  if (target.id == "gate_1") targetName = "Gate 1";
+  else if (target.id == "polca_parking") targetName = "Polca";
+  else if (target.id == "cbaa") targetName = "CBAA";
+  else if (target.id == "batibot") targetName = "Batibot";
+  else if (target.id == "shs_bldg") targetName = "SHS Bldg";
+  else if (target.id == "uls") targetName = "ULS";
+  else if (target.id == "gate_3") targetName = "Gate 3";
+  if (targetName.length() > 8) targetName = targetName.substring(0, 8);
+
+
+  String etaDuration;
+  if (etaTotalSeconds < 60) {
+    etaDuration = String(etaTotalSeconds) + " sec";
+  } else {
+    const int etaTotalMinutes = (int)round(etaTotalSeconds / 60.0);
+    etaDuration = String(etaTotalMinutes) + " min";
+  }
+
+
+  return "ETA " + targetName + " " + etaDuration;
+}
+
+
+
+
+void updateGpsDisplaySnapshot() {
+  const bool haveCoordinates = gpsHasFix || gpsCoordinatesAvailable;
+  latestGpsSpeedText = haveCoordinates
+      ? String("SPEED: ") + String(gpsSpeedKmh, 2) + " km/h"
+      : "SPEED: --";
+  latestGpsEtaText = getEstimatedArrivalText();
+}
+
+
+
+
+String vehicleStatus = "BREAK";
+enum class CloudStatus : uint8_t { connecting, uploadFailed, connected };
+CloudStatus cloudStatus = CloudStatus::connecting;
+
+
+
 
 // =====================================================
 // GPS INFORMATION
@@ -216,9 +514,33 @@ double gpsLatitude = 0.0;
 double gpsLongitude = 0.0;
 double gpsSpeedKmh = 0.0;
 
+
+
+
 bool gpsHasFix = false;
+bool gpsCoordinatesAvailable = false;
 bool sim808Available = false;
-bool fuelingMode = false;
+bool cellularDataReady = false;
+
+
+
+
+// Keep the last valid fix in LittleFS so a reset does not clear the display.
+struct GpsCacheRecord {
+  uint32_t magic;
+  double latitude;
+  double longitude;
+  double speedKmh;
+  uint32_t checksum;
+};
+const uint32_t GPS_CACHE_MAGIC = 0x47505331;
+const char* GPS_CACHE_PATH = "/lastgps.bin";
+unsigned long lastGpsCacheSave = 0;
+double lastCachedLatitude = 999.0;
+double lastCachedLongitude = 999.0;
+
+
+
 
 // =====================================================
 // STATUS CONDITIONS
@@ -226,17 +548,13 @@ bool fuelingMode = false;
 const double MOVEMENT_SPEED_KMH = 1.5;
 const unsigned long BREAK_DELAY = 30000;
 
-// Fueling entry location
-const double FUEL_ENTRY_LAT = 14.322621555762716;
-const double FUEL_ENTRY_LON = 120.96376350989355;
 
-// Fueling exit location
-const double FUEL_EXIT_LAT = 14.32056586315423;
-const double FUEL_EXIT_LON = 120.96333703866406;
 
-const double FUEL_RADIUS_METERS = 40.0;
 
 unsigned long stoppedSince = 0;
+
+
+
 
 // =====================================================
 // TIMING
@@ -245,25 +563,34 @@ const unsigned long GPS_REQUEST_INTERVAL = 1000;
 const unsigned long VEHICLE_SYNC_INTERVAL = 10000;
 const unsigned long STOP_VEHICLE_SYNC_INTERVAL = 5000;
 const unsigned long ROUTE_SYNC_INTERVAL = 300000;
-const unsigned long GPS_UPLOAD_INTERVAL = 2000;
-const unsigned long GPS_WATCHDOG_INTERVAL = 15000;
-const unsigned long BATTERY_CHECK_INTERVAL = 30000;
+const unsigned long ROUTE_RETRY_INTERVAL = 30000;
+const unsigned long FUELING_SYNC_INTERVAL = 300000;
+const unsigned long FUELING_RETRY_INTERVAL = 30000;
+const unsigned long GPS_UPLOAD_INTERVAL = 10000;
 const unsigned long GPS_RESTART_DELAY = 2000;
-const unsigned long LCD_PAGE_INTERVAL = 3000;
-const unsigned long WIFI_RETRY_INTERVAL = 30000;
+const unsigned long LCD_PAGE_INTERVAL = 5000;
 const unsigned long SIM_RETRY_INTERVAL = 15000;
+
+
+
 
 unsigned long lastGPSRequest = 0;
 unsigned long lastVehicleSync = 0;
 unsigned long lastRouteSync = 0;
+unsigned long lastFuelingSync = 0;
 unsigned long lastGPSUpload = 0;
-unsigned long lastGPSWatchdog = 0;
-unsigned long lastBatteryCheck = 0;
+unsigned long lastSuccessfulGpsUpload = 0;
 unsigned long lastLCDPageSwitch = 0;
-unsigned long lastWiFiRetry = 0;
 unsigned long lastSIMRetry = 0;
+unsigned long lastCellularRetry = 0;
+bool relayHttpActionPending = false;
+unsigned long relayHttpActionStarted = 0;
+
 
 uint8_t lcdPage = 0;
+
+
+
 
 // =====================================================
 // LCD FUNCTIONS
@@ -273,115 +600,126 @@ String fitLCD(String text) {
     text = text.substring(0, LCD_COLUMNS);
   }
 
+
+
+
   while (text.length() < LCD_COLUMNS) {
     text += " ";
   }
 
+
+
+
   return text;
 }
+
+
+
 
 void lcdLine(uint8_t row, String text) {
   lcd.setCursor(0, row);
   lcd.print(fitLCD(text));
 }
 
-void displayJeepInformation() {
-  lcdLine(0, currentStopIndex >= 0 ? "STOP: " + routeStops[currentStopIndex].name : "TYPE: " + VEHICLE_TYPE);
-  lcdLine(1, "STATUS: " + vehicleStatus);
-  lcdLine(2, "ONBOARD: " + String(onboardCount));
-  lcdLine(3, currentStopIndex >= 0 ? "EXPECTED OFF: " + String(expectedOffCount) : "OUTBOARD: " + String(outboardCount));
+
+
+
+void displayWelcomeScreen() {
+  lcd.clear();
+  lcdLine(0, "HELLO DAY");
+  lcdLine(1, "WELCOME TO");
+  lcdLine(2, "IKOT LASALLE");
+  delay(3000);
 }
+
+
+
+
+void displayJeepInformation() {
+  lcdLine(0, "TYPE: " + dbVehicleType);
+  lcdLine(1, vehicleDataLoaded ? "ONBOARD: " + String(onboardCount) : "ONBOARD: --");
+  lcdLine(2, vehicleDataLoaded ? "EXPECTED OFF: " + String(expectedOffboardingCount) : "EXPECTED OFF: --");
+  lcdLine(3, dbVehicleStatus.length() ? "STATUS: " + dbVehicleStatus : "STATUS: --");
+}
+
+
+
+
+const char* cloudStatusText() {
+  switch (cloudStatus) {
+    case CloudStatus::connected: return "CONNECTED";
+    case CloudStatus::uploadFailed: return "PENDING";
+    default: return "CONNECTING...";
+  }
+}
+
+
+
 
 void displayGPSLocation() {
-  if (gpsHasFix) {
+  const bool haveCoordinates = gpsHasFix || gpsCoordinatesAvailable;
+  if (haveCoordinates) {
     lcdLine(0, "LAT: " + String(gpsLatitude, 6));
     lcdLine(1, "LON: " + String(gpsLongitude, 6));
-    lcdLine(2, "SPEED: " + String(gpsSpeedKmh, 1));
-    lcdLine(3, "STATUS: " + vehicleStatus);
   } else {
-    lcdLine(0, "LAT: WAITING");
-    lcdLine(1, "LON: WAITING");
-    lcdLine(2, "GPS: NO FIX");
-    lcdLine(3, "STATUS: " + vehicleStatus);
+    lcdLine(0, "LAT: --");
+    lcdLine(1, "LON: --");
   }
+  lcdLine(2, latestGpsSpeedText);
+  lcdLine(3, latestGpsEtaText);
 }
+
+
+void displayGPSSummary() {
+  lcdLine(0, dbLocationLabel.length() ? dbLocationLabel : "LOC: --");
+  lcdLine(1, dbVehicleStatus.length() ? "STATUS: " + dbVehicleStatus : "STATUS: --");
+  lcdLine(2, latestGpsSpeedText);
+  lcdLine(3, latestGpsEtaText);
+}
+
+
+
+
+void drawCurrentLCDPage();
+
+
+
+
+void setCloudStatus(CloudStatus nextStatus) {
+  if (cloudStatus == nextStatus) return;
+  cloudStatus = nextStatus;
+  drawCurrentLCDPage();
+}
+
+
+
 
 void drawCurrentLCDPage() {
-  if (lcdPage == 0) {
-    displayJeepInformation();
-  } else {
-    displayGPSLocation();
+  switch (lcdPage) {
+    case 0: displayGPSLocation(); break;
+    case 1: displayGPSSummary(); break;
+    default: displayJeepInformation(); break;
   }
 }
 
+
+
+
 void updateLCDPages() {
-  if (currentStopIndex >= 0 || (stopEnteredAt != 0 && millis() - stopEnteredAt < 10000)) {
-    if (lcdPage != 0) {
-      lcdPage = 0;
-      drawCurrentLCDPage();
-    }
-    lastLCDPageSwitch = millis();
-    return;
-  }
   if (millis() - lastLCDPageSwitch >= LCD_PAGE_INTERVAL) {
     lastLCDPageSwitch = millis();
-
-    lcdPage++;
-
-    if (lcdPage > 1) {
-      lcdPage = 0;
-    }
-
+    lcdPage = (lcdPage + 1) % 3;
+    const char* pageNames[] = {
+      "GPS details", "GPS summary", "onboard/outboard"
+    };
+    Serial.print("LCD page: ");
+    Serial.println(pageNames[lcdPage]);
     drawCurrentLCDPage();
   }
 }
 
-// =====================================================
-// WIFI
-// =====================================================
-void connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
 
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(WIFI_SSID);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  unsigned long started = millis();
-
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - started < 15000) {
-    delay(500);
-    yield();
-    Serial.print(".");
-  }
-
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
-
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("WiFi connection failed");
-  }
-}
-
-void maintainWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
-
-  if (millis() - lastWiFiRetry >= WIFI_RETRY_INTERVAL) {
-    lastWiFiRetry = millis();
-    connectWiFi();
-  }
-}
 
 // =====================================================
 // SIM808 COMMUNICATION
@@ -392,38 +730,68 @@ void clearSIMBuffer() {
   }
 }
 
+
+
+
 String sendATCommand(
   const String& command,
   unsigned long timeout
 ) {
   clearSIMBuffer();
 
+
+
+
   Serial.print(">> ");
   Serial.println(command);
 
+
+
+
   sim808.println(command);
+
+
+
 
   String response = "";
   unsigned long startTime = millis();
   unsigned long lastCharacterTime = millis();
 
+
+
+
   while (millis() - startTime < timeout) {
     while (sim808.available()) {
       char character = sim808.read();
 
+
+
+
       response += character;
       lastCharacterTime = millis();
     }
+
+
+
 
     if (response.length() > 0 &&
         millis() - lastCharacterTime > 400) {
       break;
     }
 
+
+
+
     yield();
   }
 
+
+
+
   Serial.println("<<");
+
+
+
 
   if (response.length() > 0) {
     Serial.println(response);
@@ -431,69 +799,135 @@ String sendATCommand(
     Serial.println("[NO RESPONSE]");
   }
 
+
+
+
   return response;
 }
 
-void logSIM808Battery() {
-  if (!sim808Available) {
-    return;
+bool connectCellularData() {
+  if (!sim808Available) return false;
+  if (sendATCommand("AT+CPIN?", 3000).indexOf("READY") < 0) {
+    Serial.println("SIM card is not ready");
+    return false;
   }
-
-  if (lastBatteryCheck != 0 &&
-      millis() - lastBatteryCheck < BATTERY_CHECK_INTERVAL) {
-    return;
+  const String registration = sendATCommand("AT+CREG?", 3000);
+  if (registration.indexOf(",1") < 0 && registration.indexOf(",5") < 0) {
+    Serial.println("SIM808 has not registered on a GSM network");
+    return false;
   }
-
-  lastBatteryCheck = millis();
-
-  Serial.println("Checking SIM808 battery...");
-
-  String response = sendATCommand("AT+CBC", 3000);
-
-  if (response.indexOf("+CBC:") < 0) {
-    Serial.println("Unable to read SIM808 battery level");
+  if (sendATCommand("AT+CGATT?", 3000).indexOf("+CGATT: 1") < 0) {
+    Serial.println("SIM808 is not attached to GPRS");
+    return false;
   }
+  if (sendATCommand("AT+SAPBR=3,1,\"Contype\",\"GPRS\"", 3000).indexOf("OK") < 0 ||
+      sendATCommand(String("AT+SAPBR=3,1,\"APN\",\"") + SIM_APN + "\"", 3000).indexOf("OK") < 0) {
+    Serial.println("SIM808 GPRS APN configuration failed");
+    return false;
+  }
+  String bearer = sendATCommand("AT+SAPBR=2,1", 3000);
+  if (bearer.indexOf("+SAPBR: 1,1") < 0) {
+    if (sendATCommand("AT+SAPBR=1,1", 12000).indexOf("OK") < 0) {
+      Serial.println("SIM808 could not open GPRS bearer");
+      return false;
+    }
+    bearer = sendATCommand("AT+SAPBR=2,1", 3000);
+  }
+  cellularDataReady = bearer.indexOf("+SAPBR: 1,1") >= 0;
+  Serial.println(cellularDataReady ? "SIM808 GPRS ready" : "SIM808 GPRS bearer unavailable");
+  return cellularDataReady;
 }
+
+void maintainCellularData() {
+  if (!sim808Available || cellularDataReady ||
+      millis() - lastCellularRetry < 30000) return;
+  lastCellularRetry = millis();
+  connectCellularData();
+}
+
+
+
 
 bool testSIM808() {
   for (int attempt = 1; attempt <= 3; attempt++) {
     Serial.print("SIM808 test attempt ");
     Serial.println(attempt);
 
+
+
+
     String response = sendATCommand("AT", 3000);
+
+
+
 
     if (response.indexOf("OK") >= 0) {
       Serial.println("SIM808 is responding");
+
+
+
 
       sim808Available = true;
       return true;
     }
 
+
+
+
     delay(1000);
   }
 
+
+
+
   Serial.println("SIM808 is unavailable");
 
+
+
+
   sim808Available = false;
+  cellularDataReady = false;
   gpsHasFix = false;
-  jeepneyStatus = "SIM ERROR";
+
+
+
 
   return false;
 }
+
+
+
 
 void initializeSIM808() {
   if (!testSIM808()) {
     return;
   }
 
+
+
+
   // Disable command echo.
   sendATCommand("ATE0", 3000);
+
+  // Report the modem's reason when an AT command fails.
+  sendATCommand("AT+CMEE=2", 3000);
+
+
+
 
   // Disable SIM808 UART sleep.
   sendATCommand("AT+CSCLK=0", 3000);
 
+
+
+
   sim808Available = true;
+  cellularDataReady = false;
+  connectCellularData();
 }
+
+
+
 
 // =====================================================
 // GPS POWER CONTROL
@@ -503,83 +937,74 @@ bool startGPS() {
     return false;
   }
 
+
+
+
   Serial.println("Turning GPS ON...");
 
+
+
+
   String response =
-    sendATCommand("AT+CGNSPWR=1", 5000);
+    sendATCommand("AT+CGNSPWR=1", 2000);
+
+
+
 
   if (response.indexOf("OK") < 0) {
     Serial.println("GPS power command failed");
 
+
+
+
     gpsHasFix = false;
-    jeepneyStatus = "GPS ERROR";
+
+
+
 
     return false;
   }
 
+
+
+
   delay(GPS_RESTART_DELAY);
 
-  response = sendATCommand("AT+CGNSPWR?", 5000);
+
+
+
+  response = sendATCommand("AT+CGNSPWR?", 2000);
+
+
+
 
   if (response.indexOf("+CGNSPWR: 1") >= 0) {
     Serial.println("GPS confirmed ON");
 
-    if (!gpsHasFix) {
-      jeepneyStatus = "NO FIX";
-    }
+
+
 
     return true;
   }
 
+
+
+
   Serial.println("GPS still reports OFF");
 
+
+
+
   gpsHasFix = false;
-  jeepneyStatus = "GPS OFF";
+
+
+
 
   return false;
 }
 
-void keepGPSOn() {
-  if (millis() - lastGPSWatchdog <
-      GPS_WATCHDOG_INTERVAL) {
-    return;
-  }
 
-  lastGPSWatchdog = millis();
 
-  Serial.println();
-  Serial.println("Running GPS watchdog...");
-
-  // Check whether the SIM808 itself is alive.
-  String response = sendATCommand("AT", 3000);
-
-  if (response.indexOf("OK") < 0) {
-    Serial.println("SIM808 stopped responding");
-
-    sim808Available = false;
-    gpsHasFix = false;
-    jeepneyStatus = "SIM ERROR";
-
-    drawCurrentLCDPage();
-    return;
-  }
-
-  sim808Available = true;
-
-  // Prevent serial sleep.
-  sendATCommand("AT+CSCLK=0", 3000);
-
-  // Reassert ON without ever cycling the GPS engine off.
-  response = sendATCommand("AT+CGNSPWR=1", 3000);
-
-  if (response.indexOf("OK") >= 0) {
-    Serial.println("GPS watchdog: continuous ON requested");
-  } else {
-    Serial.println("GPS watchdog: unable to keep GPS ON");
-    gpsHasFix = false;
-    jeepneyStatus = "GPS ERROR";
-  }
-}
 
 // =====================================================
 // GPS RESPONSE PARSING
@@ -591,47 +1016,80 @@ String getCSVField(
   int currentField = 0;
   int fieldStart = 0;
 
+
+
+
   for (int i = 0; i <= (int)data.length(); i++) {
     if (i == (int)data.length() || data[i] == ',') {
       if (currentField == requestedField) {
         return data.substring(fieldStart, i);
       }
 
+
+
+
       currentField++;
       fieldStart = i + 1;
     }
   }
 
+
+
+
   return "";
 }
 
+
+
+
 String extractCGNSINFLine(const String& response) {
   int startPosition = response.indexOf("+CGNSINF:");
+
+
+
 
   if (startPosition < 0) {
     return "";
   }
 
+
+
+
   int lineEnd = response.indexOf('\n', startPosition);
+
+
+
 
   if (lineEnd < 0) {
     lineEnd = response.length();
   }
 
+
+
+
   String gpsLine =
     response.substring(startPosition + 9, lineEnd);
 
+
+
+
   gpsLine.trim();
+
+
+
 
   return gpsLine;
 }
 
-// =====================================================
-// DISTANCE CALCULATION
-// =====================================================
+
+
+
 double degreesToRadians(double degrees) {
   return degrees * PI / 180.0;
 }
+
+
+
 
 double distanceMeters(
   double latitude1,
@@ -640,53 +1098,179 @@ double distanceMeters(
   double longitude2
 ) {
   const double earthRadiusMeters = 6371000.0;
-
-  double latitudeDifference =
-    degreesToRadians(latitude2 - latitude1);
-
-  double longitudeDifference =
-    degreesToRadians(longitude2 - longitude1);
-
-  double a =
-    sin(latitudeDifference / 2.0) *
-    sin(latitudeDifference / 2.0) +
-    cos(degreesToRadians(latitude1)) *
-    cos(degreesToRadians(latitude2)) *
-    sin(longitudeDifference / 2.0) *
-    sin(longitudeDifference / 2.0);
-
-  double c =
-    2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-
-  return earthRadiusMeters * c;
+  const double latitudeDifference = degreesToRadians(latitude2 - latitude1);
+  const double longitudeDifference = degreesToRadians(longitude2 - longitude1);
+  const double a =
+      sin(latitudeDifference / 2.0) * sin(latitudeDifference / 2.0) +
+      cos(degreesToRadians(latitude1)) * cos(degreesToRadians(latitude2)) *
+      sin(longitudeDifference / 2.0) * sin(longitudeDifference / 2.0);
+  return earthRadiusMeters * 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
 }
+
+
+
+
+uint32_t gpsCacheChecksum(const GpsCacheRecord& record) {
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&record);
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < offsetof(GpsCacheRecord, checksum); ++i) {
+    hash = (hash ^ bytes[i]) * 16777619u;
+  }
+  return hash;
+}
+
+
+
+
+void loadGpsCache() {
+  File file = LittleFS.open(GPS_CACHE_PATH, "r");
+  if (!file) return;
+  if (file.size() != sizeof(GpsCacheRecord)) {
+    file.close();
+    return;
+  }
+  GpsCacheRecord record = {};
+  const size_t bytesRead =
+      file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record));
+  file.close();
+  if (bytesRead != sizeof(record) || record.magic != GPS_CACHE_MAGIC ||
+      record.checksum != gpsCacheChecksum(record) ||
+      !isfinite(record.latitude) || !isfinite(record.longitude) ||
+      record.latitude < -90 || record.latitude > 90 ||
+      record.longitude < -180 || record.longitude > 180 ||
+      (record.latitude == 0 && record.longitude == 0)) {
+    Serial.println("Saved GPS cache is invalid; waiting for a fresh fix");
+    return;
+  }
+  gpsLatitude = record.latitude;
+  gpsLongitude = record.longitude;
+  gpsSpeedKmh = record.speedKmh;
+  gpsCoordinatesAvailable = true;
+  lastCachedLatitude = record.latitude;
+  lastCachedLongitude = record.longitude;
+  Serial.printf("Restored saved GPS coordinates: %.6f, %.6f (display only until fresh fix)\n",
+                gpsLatitude, gpsLongitude);
+}
+
+
+
+
+void saveGpsCacheIfNeeded() {
+  if (!gpsHasFix) return;
+  const bool movedEnough = lastCachedLatitude == 999.0 ||
+      distanceMeters(gpsLatitude, gpsLongitude,
+                     lastCachedLatitude, lastCachedLongitude) >= 25.0;
+  const bool saveDue = millis() - lastGpsCacheSave >= 60000;
+  if (!movedEnough && !saveDue) return;
+
+
+
+
+  GpsCacheRecord record = {};
+  record.magic = GPS_CACHE_MAGIC;
+  record.latitude = gpsLatitude;
+  record.longitude = gpsLongitude;
+  record.speedKmh = gpsSpeedKmh;
+  record.checksum = gpsCacheChecksum(record);
+
+
+
+
+  File file = LittleFS.open("/lastgps.tmp", "w");
+  if (!file) {
+    Serial.println("Could not open GPS cache for writing");
+    return;
+  }
+  const size_t written =
+      file.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record));
+  file.flush();
+  file.close();
+  if (written != sizeof(record)) {
+    LittleFS.remove("/lastgps.tmp");
+    Serial.println("GPS cache write was incomplete");
+    return;
+  }
+  LittleFS.remove(GPS_CACHE_PATH);
+  if (LittleFS.rename("/lastgps.tmp", GPS_CACHE_PATH)) {
+    lastGpsCacheSave = millis();
+    lastCachedLatitude = gpsLatitude;
+    lastCachedLongitude = gpsLongitude;
+    Serial.println("Last known GPS coordinates saved to LittleFS");
+  }
+}
+
+
+
 
 void updateCurrentStop() {
   if (!gpsHasFix || routeStopCount == 0) return;
-  if (currentStopIndex >= 0) {
-    RouteStop& stop = routeStops[currentStopIndex];
-    if (distanceMeters(gpsLatitude, gpsLongitude, stop.latitude, stop.longitude) <= stop.radius + 15.0) return;
+
+
+  if (isFuelingTripActive()) {
+    routeOnCampus = false;
+    currentStopIndex = -1;
+    expectedOffboardingCount = 0;
+    return;
   }
+
+
+
+
+  if (currentStopIndex >= 0) {
+    const RouteStop& stop = routeStops[currentStopIndex];
+    if (distanceMeters(gpsLatitude, gpsLongitude, stop.latitude,
+                       stop.longitude) <= stop.radius + 15.0) {
+      return;
+    }
+  }
+
+
+
+
   int nearest = -1;
   double nearestDistance = 1e9;
   for (int i = 0; i < routeStopCount; ++i) {
     const RouteStop& stop = routeStops[i];
-    double distance = distanceMeters(gpsLatitude, gpsLongitude, stop.latitude, stop.longitude);
+    const double distance = distanceMeters(
+        gpsLatitude, gpsLongitude, stop.latitude, stop.longitude);
     if (distance <= stop.radius && distance < nearestDistance) {
       nearest = i;
       nearestDistance = distance;
     }
   }
+
+
+
+
   if (nearest == currentStopIndex) return;
   currentStopIndex = nearest;
-  stopTransitionPending = true;
   if (nearest >= 0) {
-    stopEnteredAt = millis();
-    lcdPage = 0;
-    lastVehicleSync = 0;
+    if (routeStopCount > 1 &&
+        (nearest == 0 || nearest == routeStopCount - 1)) {
+      const bool towardLast = nearest == 0;
+      if (routeMovingTowardLastStop != towardLast) {
+        routeMovingTowardLastStop = towardLast;
+        saveRouteDirection();
+        lastGPSUpload = millis() - GPS_UPLOAD_INTERVAL;
+      }
+    }
+    if (routeStops[nearest].id == "gate_1" ||
+        routeStops[nearest].name == "Gate 1") {
+      routeOnCampus = !routeOnCampus;
+    } else if (routeStops[nearest].id == "gate_3" ||
+               routeStops[nearest].name == "Gate 3") {
+      routeOnCampus = !routeOnCampus;
+    } else {
+      routeOnCampus = true;
+    }
   }
+  expectedOffboardingCount = 0;
+  lastVehicleSync = 0;
   drawCurrentLCDPage();
 }
+
+
+
 
 // =====================================================
 // JEEPNEY STATUS
@@ -696,166 +1280,240 @@ void updateJeepneyStatus() {
     stoppedSince = 0;
     return;
   }
-
-  double entryDistance = distanceMeters(
-    gpsLatitude,
-    gpsLongitude,
-    FUEL_ENTRY_LAT,
-    FUEL_ENTRY_LON
-  );
-
-  double exitDistance = distanceMeters(
-    gpsLatitude,
-    gpsLongitude,
-    FUEL_EXIT_LAT,
-    FUEL_EXIT_LON
-  );
-
-  Serial.print("Fuel entry distance: ");
-  Serial.print(entryDistance, 1);
-  Serial.println(" meters");
-
-  Serial.print("Fuel exit distance: ");
-  Serial.print(exitDistance, 1);
-  Serial.println(" meters");
-
-  // Enter fueling mode.
-  if (!fuelingMode &&
-      entryDistance <= FUEL_RADIUS_METERS) {
-    fuelingMode = true;
-  }
-
-  // Leave fueling mode.
-  if (fuelingMode &&
-      exitDistance <= FUEL_RADIUS_METERS) {
-    fuelingMode = false;
-  }
-
-  // Fueling has the highest priority.
-  if (fuelingMode) {
-    jeepneyStatus = "FUELING";
+  updateFuelingTripState();
+  if (isFuelingTripActive()) {
     stoppedSince = 0;
+    vehicleStatus = "FUELING GAS";
     return;
   }
-
-  // Jeepney is moving.
+  if (vehicleStatus == "FUELING GAS") vehicleStatus = "ACTIVE";
   if (gpsSpeedKmh > MOVEMENT_SPEED_KMH) {
-    jeepneyStatus = "ACTIVE";
     stoppedSince = 0;
+    vehicleStatus = "ACTIVE";
     return;
   }
-
-  // Jeepney has just stopped.
-  if (stoppedSince == 0) {
-    stoppedSince = millis();
-    jeepneyStatus = "ACTIVE";
-    return;
-  }
-
-  // Jeepney has been stopped for at least 30 seconds.
+  if (stoppedSince == 0) stoppedSince = millis();
   if (millis() - stoppedSince >= BREAK_DELAY) {
-    jeepneyStatus = "BREAK TIME";
-  } else {
-    jeepneyStatus = "ACTIVE";
+    vehicleStatus = "BREAK";
   }
 }
+
+
+
+
+void syncClockFromGPS(const String& gpsData) {
+  if (time(nullptr) > 1700000000) return;
+  const String utcText = getCSVField(gpsData, 2);
+  if (utcText.length() < 14) return;
+  for (int i = 0; i < 14; ++i) {
+    if (utcText[i] < '0' || utcText[i] > '9') return;
+  }
+  struct tm utc = {};
+  utc.tm_year = utcText.substring(0, 4).toInt() - 1900;
+  utc.tm_mon = utcText.substring(4, 6).toInt() - 1;
+  utc.tm_mday = utcText.substring(6, 8).toInt();
+  utc.tm_hour = utcText.substring(8, 10).toInt();
+  utc.tm_min = utcText.substring(10, 12).toInt();
+  utc.tm_sec = utcText.substring(12, 14).toInt();
+  utc.tm_isdst = 0;
+  if (utc.tm_year < 124 || utc.tm_mon < 0 || utc.tm_mon > 11 ||
+      utc.tm_mday < 1 || utc.tm_mday > 31 || utc.tm_hour > 23 ||
+      utc.tm_min > 59 || utc.tm_sec > 59) return;
+  // The SIM808 timestamp is UTC; mktime must use the same timezone.
+  setTZ("UTC0");
+  const time_t gpsEpoch = mktime(&utc);
+  if (gpsEpoch <= 1700000000) return;
+  struct timeval gpsTime = {gpsEpoch, 0};
+  if (settimeofday(&gpsTime, nullptr) == 0) {
+    Serial.printf("ESP8266 clock synchronized from SIM808 GPS UTC: %s\n",
+                  utcText.c_str());
+  }
+}
+
+
+
 
 bool parseGPSResponse(const String& response) {
   String gpsData = extractCGNSINFLine(response);
 
+
+
+
   if (gpsData.length() == 0) {
     Serial.println("No +CGNSINF line found");
 
+
+
+
     gpsHasFix = false;
-    jeepneyStatus = "GPS ERROR";
+
+
+
 
     return false;
   }
+
+
+
 
   Serial.println("Parsed GPS data:");
   Serial.println(gpsData);
 
+
+
+
   int runningStatus =
     getCSVField(gpsData, 0).toInt();
+
+
+
 
   int fixStatus =
     getCSVField(gpsData, 1).toInt();
 
+
+
+
   Serial.print("GPS running status: ");
   Serial.println(runningStatus);
+
+
+
 
   Serial.print("GPS fix status: ");
   Serial.println(fixStatus);
 
-  // Report an unexpected OFF state. The watchdog only reasserts ON; it does
-  // not cycle the receiver through an OFF/restart sequence.
+
+
+
+  // Report an unexpected OFF state without restarting the GPS receiver.
   if (runningStatus != 1) {
     Serial.println("GPS engine reported OFF");
 
+
+
+
     gpsHasFix = false;
-    jeepneyStatus = "GPS ERROR";
     drawCurrentLCDPage();
+
+
+
 
     return false;
   }
+
+
+
 
   // GPS is running but has no satellite fix.
   if (fixStatus != 1) {
     gpsHasFix = false;
-    jeepneyStatus = "NO FIX";
+
+
+
 
     Serial.println("GPS is ON, but has no fix");
     Serial.println("Place antenna outdoors facing upward");
 
+
+
+
     return false;
   }
+
+
+
+
+  syncClockFromGPS(gpsData);
+
+
+
 
   String latitudeText =
     getCSVField(gpsData, 3);
 
+
+
+
   String longitudeText =
     getCSVField(gpsData, 4);
+
+
+
 
   String speedText =
     getCSVField(gpsData, 6);
 
+
+
+
   if (latitudeText.length() == 0 ||
       longitudeText.length() == 0) {
     gpsHasFix = false;
-    jeepneyStatus = "NO FIX";
+
+
+
 
     return false;
   }
 
+
+
+
   gpsLatitude = latitudeText.toDouble();
   gpsLongitude = longitudeText.toDouble();
   gpsSpeedKmh = speedText.toDouble();
+
+
+
 
   if (!isfinite(gpsLatitude) || !isfinite(gpsLongitude) ||
       gpsLatitude < -90 || gpsLatitude > 90 ||
       gpsLongitude < -180 || gpsLongitude > 180 ||
       (gpsLatitude == 0 && gpsLongitude == 0)) {
     gpsHasFix = false;
-    jeepneyStatus = "BAD GPS";
     return false;
   }
 
+
+
+
   gpsHasFix = true;
+  gpsCoordinatesAvailable = true;
+  saveGpsCacheIfNeeded();
+
+
+
 
   Serial.print("Latitude: ");
   Serial.println(gpsLatitude, 6);
 
+
+
+
   Serial.print("Longitude: ");
   Serial.println(gpsLongitude, 6);
+
+
+
 
   Serial.print("Speed: ");
   Serial.print(gpsSpeedKmh, 2);
   Serial.println(" km/h");
 
+
+
+
   updateJeepneyStatus();
+
+
+
 
   return true;
 }
+
+
+
 
 // =====================================================
 // FETCH GPS
@@ -863,36 +1521,52 @@ bool parseGPSResponse(const String& response) {
 void fetchGPS() {
   if (!sim808Available) {
     gpsHasFix = false;
-    jeepneyStatus = "SIM ERROR";
     return;
   }
 
-  logSIM808Battery();
+
+
 
   String response =
-    sendATCommand("AT+CGNSINF", 5000);
+    sendATCommand("AT+CGNSINF", 2000);
+
+
+
 
   if (response.indexOf("+CGNSINF:") < 0) {
     Serial.println("No GPS response received");
 
+
+
+
     String testResponse =
       sendATCommand("AT", 3000);
+
+
+
 
     if (testResponse.indexOf("OK") < 0) {
       sim808Available = false;
       gpsHasFix = false;
-      jeepneyStatus = "SIM ERROR";
     } else {
       sim808Available = true;
       gpsHasFix = false;
-      jeepneyStatus = "GPS ERROR";
     }
+
+
+
 
     return;
   }
 
+
+
+
   parseGPSResponse(response);
 }
+
+
+
 
 // =====================================================
 // SIM808 RECOVERY
@@ -902,253 +1576,366 @@ void retrySIM808() {
     return;
   }
 
+
+
+
   if (millis() - lastSIMRetry <
       SIM_RETRY_INTERVAL) {
     return;
   }
 
+
+
+
   lastSIMRetry = millis();
+
+
+
 
   Serial.println("Retrying SIM808 connection...");
 
+
+
+
   initializeSIM808();
+
+
+
 
   if (sim808Available) {
     startGPS();
   }
 
+
+
+
   drawCurrentLCDPage();
 }
 
 // =====================================================
-// FIREBASE: one GPS device updates one existing vehicle document.
-// Uses Firebase Auth ID tokens and the Firestore REST API over verified TLS.
+// ENCRYPTED SIM808 -> RELAY TRANSPORT
 // =====================================================
-bool firebaseConfigured() {
-  return String(FIREBASE_API_KEY) != "YOUR_FIREBASE_WEB_API_KEY" &&
-         String(FIREBASE_DEVICE_EMAIL) != "YOUR_DEVICE_EMAIL" &&
-         String(FIREBASE_DEVICE_PASSWORD) != "YOUR_DEVICE_PASSWORD" &&
-         String(VEHICLE_DOCUMENT_ID) != "YOUR_JEEP_VEHICLE_DOCUMENT_ID" &&
-         String(FIREBASE_ROOT_CA).indexOf("PASTE_GOOGLE_API_ROOT_CA_PEM_HERE") < 0;
+int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
 }
 
-bool clockReady() {
-  if (time(nullptr) > 1700000000) return true;
-  configTime(0, 0, "time.google.com", "pool.ntp.org");
-  const unsigned long started = millis();
-  while (time(nullptr) <= 1700000000 && millis() - started < 10000) {
-    delay(250);
-    yield();
+bool decodeHex(const String& value, uint8_t* output, size_t length) {
+  if (value.length() != length * 2) return false;
+  for (size_t i = 0; i < length; ++i) {
+    const int high = hexNibble(value[i * 2]);
+    const int low = hexNibble(value[i * 2 + 1]);
+    if (high < 0 || low < 0) return false;
+    output[i] = (high << 4) | low;
   }
-  return time(nullptr) > 1700000000;
-}
-
-bool signInFirebase() {
-  if (!firebaseConfigured() || WiFi.status() != WL_CONNECTED || !clockReady()) {
-    Serial.println("Firebase not configured, WiFi offline, or clock unavailable");
-    return false;
-  }
-
-  BearSSL::WiFiClientSecure client;
-  BearSSL::X509List trustAnchor(FIREBASE_ROOT_CA);
-  client.setTrustAnchors(&trustAnchor);
-  client.setTimeout(12000);
-
-  HTTPClient http;
-  const String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=") + FIREBASE_API_KEY;
-  if (!http.begin(client, url)) return false;
-  http.setTimeout(12000);
-  http.addHeader("Content-Type", "application/json");
-
-  JsonDocument request;
-  request["email"] = FIREBASE_DEVICE_EMAIL;
-  request["password"] = FIREBASE_DEVICE_PASSWORD;
-  request["returnSecureToken"] = true;
-  String body;
-  serializeJson(request, body);
-
-  int code = http.POST(body);
-  String response = http.getString();
-  http.end();
-  if (code != 200) {
-    Serial.printf("Firebase sign-in failed (HTTP %d)\n", code);
-    // Firebase's JSON error identifies issues such as EMAIL_NOT_FOUND,
-    // INVALID_LOGIN_CREDENTIALS, or API-key configuration problems.
-    Serial.println(response);
-    return false;
-  }
-
-  JsonDocument result;
-  if (deserializeJson(result, response)) {
-    Serial.println("Firebase sign-in response was not valid JSON");
-    return false;
-  }
-  String token = result["idToken"].as<String>();
-  unsigned long expiresSeconds = result["expiresIn"].as<String>().toInt();
-  if (token.isEmpty() || expiresSeconds < 120) return false;
-
-  firebaseIdToken = token;
-  firebaseTokenIssuedAt = millis();
-  firebaseTokenLifetimeMs = (expiresSeconds - 60UL) * 1000UL;
-  Serial.println("Firebase device signed in");
   return true;
 }
 
-bool firebaseTokenReady() {
-  if (firebaseIdToken.length() > 0 &&
-      millis() - firebaseTokenIssuedAt < firebaseTokenLifetimeMs) return true;
-
-  if (lastFirebaseAuthAttempt != 0 &&
-      millis() - lastFirebaseAuthAttempt < FIREBASE_AUTH_RETRY_MS) return false;
-  lastFirebaseAuthAttempt = millis();
-  firebaseIdToken = "";
-  return signInFirebase();
+String encodeHex(const uint8_t* input, size_t length) {
+  static const char digits[] = "0123456789abcdef";
+  String output;
+  if (!output.reserve(length * 2)) return "";
+  for (size_t i = 0; i < length; ++i) {
+    output += digits[input[i] >> 4];
+    output += digits[input[i] & 15];
+  }
+  return output;
 }
 
-void syncRouteStops() {
-  if (WiFi.status() != WL_CONNECTED || !firebaseTokenReady()) return;
-  BearSSL::WiFiClientSecure client;
-  BearSSL::X509List trustAnchor(FIREBASE_ROOT_CA);
-  client.setTrustAnchors(&trustAnchor);
-  client.setTimeout(3000);
-  HTTPClient http;
-  const String url = String("https://firestore.googleapis.com/v1/projects/") +
-      FIREBASE_PROJECT_ID + "/databases/(default)/documents/routes?pageSize=30";
-  if (!http.begin(client, url)) return;
-  http.setTimeout(3000);
-  http.addHeader("Authorization", "Bearer " + firebaseIdToken);
-  const int code = http.GET();
-  const String response = code == 200 ? http.getString() : "";
-  http.end();
-  if (code == 401) firebaseIdToken = "";
-  if (code != 200) {
-    Serial.printf("Route sync failed (HTTP %d)\n", code);
-    return;
+bool relayConfigured() {
+  return String(RELAY_HOST) != "YOUR_RELAY_HOST" &&
+         strlen(RELAY_KEY_HEX) == 128;
+}
+
+void relayMac(const uint8_t* key, const char* direction,
+              const uint8_t* nonce, const uint8_t* data,
+              size_t dataLength, uint8_t output[32]) {
+  br_hmac_key_context keyContext;
+  br_hmac_key_init(&keyContext, &br_sha256_vtable, key + 32, 32);
+  br_hmac_context context;
+  br_hmac_init(&context, &keyContext, 0);
+  br_hmac_update(&context, direction, 3);
+  br_hmac_update(&context, nonce, 12);
+  br_hmac_update(&context, data, dataLength);
+  br_hmac_out(&context, output);
+}
+
+bool sealRelayMessage(const String& plain, String& envelope,
+                      String& requestNonce) {
+  uint8_t key[64];
+  if (!decodeHex(String(RELAY_KEY_HEX), key, sizeof(key))) return false;
+  uint8_t nonce[12];
+  ESP.random(nonce, sizeof(nonce));
+  std::unique_ptr<uint8_t[]> data(new (std::nothrow) uint8_t[plain.length()]);
+  if (!data) return false;
+  memcpy(data.get(), plain.c_str(), plain.length());
+  br_aes_ct_ctr_keys aes;
+  br_aes_ct_ctr_init(&aes, key, 32);
+  br_aes_ct_ctr_run(&aes, nonce, 0, data.get(), plain.length());
+  uint8_t signature[32];
+  relayMac(key, "req", nonce, data.get(), plain.length(), signature);
+  requestNonce = encodeHex(nonce, sizeof(nonce));
+  JsonDocument json;
+  json["v"] = 1;
+  json["nonce"] = requestNonce;
+  json["data"] = encodeHex(data.get(), plain.length());
+  json["mac"] = encodeHex(signature, sizeof(signature));
+  envelope = "";
+  serializeJson(json, envelope);
+  return !envelope.isEmpty();
+}
+
+bool openRelayMessage(const String& envelope, const String& requestNonce,
+                      JsonDocument& result) {
+  JsonDocument outer;
+  if (deserializeJson(outer, envelope)) return false;
+  const String nonceHex = outer["nonce"].as<String>();
+  const String dataHex = outer["data"].as<String>();
+  const String macHex = outer["mac"].as<String>();
+  if (outer["v"].as<int>() != 1 || dataHex.length() % 2 != 0 ||
+      dataHex.length() > 12000) return false;
+  uint8_t key[64], nonce[12], signature[32];
+  if (!decodeHex(String(RELAY_KEY_HEX), key, sizeof(key)) ||
+      !decodeHex(nonceHex, nonce, sizeof(nonce)) ||
+      !decodeHex(macHex, signature, sizeof(signature))) return false;
+  const size_t length = dataHex.length() / 2;
+  std::unique_ptr<uint8_t[]> data(new (std::nothrow) uint8_t[length + 1]);
+  if (!data || !decodeHex(dataHex, data.get(), length)) return false;
+  uint8_t expected[32];
+  relayMac(key, "res", nonce, data.get(), length, expected);
+  uint8_t difference = 0;
+  for (size_t i = 0; i < sizeof(expected); ++i) difference |= expected[i] ^ signature[i];
+  if (difference != 0) return false;
+  br_aes_ct_ctr_keys aes;
+  br_aes_ct_ctr_init(&aes, key, 32);
+  br_aes_ct_ctr_run(&aes, nonce, 0, data.get(), length);
+  data[length] = 0;
+  if (deserializeJson(result, reinterpret_cast<const char*>(data.get()))) return false;
+  return result["requestNonce"].as<String>() == requestNonce &&
+         result["ok"].as<bool>();
+}
+
+bool relayHttpPost(const String& payload, String& response) {
+  if (relayHttpActionPending) {
+    if (millis() - relayHttpActionStarted < 120000) return false;
+    // An earlier request never reported completion. Give it time before cleanup.
+    sendATCommand("AT+HTTPTERM", 3000);
+    relayHttpActionPending = false;
   }
-  JsonDocument document;
-  if (deserializeJson(document, response)) return;
+  if (!cellularDataReady && !connectCellularData()) return false;
+  String initResponse = sendATCommand("AT+HTTPINIT", 3000);
+  if (initResponse.indexOf("OK") < 0) {
+    // The ESP8266 can restart while the SIM808 still has an HTTP session open.
+    sendATCommand("AT+HTTPTERM", 3000);
+    delay(200);
+    initResponse = sendATCommand("AT+HTTPINIT", 3000);
+    if (initResponse.indexOf("OK") < 0) {
+      // The modem can retain a stale HTTP/bearer state after a failed request.
+      // Reopen its GPRS bearer instead of repeating HTTPINIT indefinitely.
+      Serial.println("SIM808 HTTP service stuck; reopening GPRS bearer");
+      sendATCommand("AT+SAPBR=0,1", 12000);
+      cellularDataReady = false;
+      delay(500);
+      if (!connectCellularData()) return false;
+      initResponse = sendATCommand("AT+HTTPINIT", 3000);
+      if (initResponse.indexOf("OK") < 0) {
+        cellularDataReady = false;
+        Serial.println("SIM808 HTTP service still unavailable after bearer recovery");
+        return false;
+      }
+    }
+  }
+  bool okay = false;
+  do {
+    if (sendATCommand("AT+HTTPPARA=\"CID\",1", 3000).indexOf("OK") < 0) break;
+    const String url = String("http://") + RELAY_HOST + ":" + RELAY_PORT + "/relay";
+    if (sendATCommand(String("AT+HTTPPARA=\"URL\",\"") + url + "\"", 3000).indexOf("OK") < 0) break;
+    if (sendATCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 3000).indexOf("OK") < 0) break;
+    if (sendATCommand(String("AT+HTTPDATA=") + payload.length() + ",10000", 3000).indexOf("DOWNLOAD") < 0) break;
+    sim808.print(payload);
+    String accepted;
+    const unsigned long dataStarted = millis();
+    while (millis() - dataStarted < 12000 && accepted.indexOf("OK") < 0) {
+      while (sim808.available()) accepted += char(sim808.read());
+      if (accepted.length() > 100) break;
+      yield();
+    }
+    if (accepted.indexOf("OK") < 0) break;
+    clearSIMBuffer();
+    sim808.println("AT+HTTPACTION=1");
+    relayHttpActionPending = true;
+    relayHttpActionStarted = millis();
+    String action;
+    while (millis() - relayHttpActionStarted < 90000) {
+      while (sim808.available()) action += char(sim808.read());
+      const int marker = action.indexOf("+HTTPACTION:");
+      if (marker >= 0 && action.indexOf('\n', marker) >= 0) break;
+      if (action.length() > 300) break;
+      yield();
+    }
+    const int actionMarker = action.indexOf("+HTTPACTION:");
+    if (actionMarker < 0 || action.indexOf('\n', actionMarker) < 0) {
+      Serial.println("SIM808 HTTP action still pending; leaving session open");
+      return false;
+    }
+    relayHttpActionPending = false;
+    if (action.indexOf("+HTTPACTION: 1,200,") < 0) {
+      Serial.println("SIM808 relay HTTP request failed: " + action);
+      cellularDataReady = false;
+      break;
+    }
+    const String raw = sendATCommand("AT+HTTPREAD", 30000);
+    const int marker = raw.indexOf("+HTTPREAD:");
+    const int bodyStart = marker < 0 ? -1 : raw.indexOf('\n', marker) + 1;
+    const int bodyEnd = raw.lastIndexOf("\r\nOK");
+    if (bodyStart <= 0 || bodyEnd <= bodyStart) break;
+    response = raw.substring(bodyStart, bodyEnd);
+    response.trim();
+    okay = true;
+  } while (false);
+  sendATCommand("AT+HTTPTERM", 3000);
+  return okay;
+}
+
+bool relayRequest(JsonDocument& request, JsonDocument& response) {
+  if (!relayConfigured()) {
+    Serial.println("Relay host or key is not configured");
+    return false;
+  }
+  if (time(nullptr) <= 1700000000) {
+    Serial.println("Relay request waiting for GPS UTC time");
+    return false;
+  }
+  request["deviceId"] = VEHICLE_DOCUMENT_ID;
+  request["ts"] = static_cast<int64_t>(time(nullptr));
+  String plain;
+  serializeJson(request, plain);
+  String envelope, nonce, reply;
+  if (!sealRelayMessage(plain, envelope, nonce) ||
+      !relayHttpPost(envelope, reply) ||
+      !openRelayMessage(reply, nonce, response)) {
+    Serial.println("Encrypted relay request failed");
+    return false;
+  }
+  return true;
+}
+
+
+
+
+// =====================================================
+// RELAY OPERATIONS
+// =====================================================
+void syncRouteStopsRelay() {
+  JsonDocument request, response;
+  request["op"] = "routes";
+  if (!relayRequest(request, response)) return;
+  const String previousStopId = currentStopIndex >= 0
+      ? routeStops[currentStopIndex].id : "";
   int count = 0;
-  for (JsonVariant item : document["documents"].as<JsonArray>()) {
-    JsonVariant fields = item["fields"];
-    if (!fields["active"]["booleanValue"].as<bool>() || fields["archived"]["booleanValue"].as<bool>()) continue;
-    JsonVariant point = fields["location"]["geoPointValue"];
-    if (point.isNull()) continue;
-    String path = item["name"].as<String>();
+  for (JsonVariant item : response["routes"].as<JsonArray>()) {
     RouteStop& stop = routeStops[count];
-    stop.id = path.substring(path.lastIndexOf('/') + 1);
-    stop.name = fields["name"]["stringValue"].as<String>();
-    stop.latitude = point["latitude"].as<double>();
-    stop.longitude = point["longitude"].as<double>();
-    stop.radius = fields["proximityRadius"]["integerValue"].as<String>().toDouble();
-    if (stop.radius <= 0) stop.radius = fields["proximityRadius"]["doubleValue"].as<double>();
+    stop.id = item["id"].as<String>();
+    stop.latitude = item["latitude"].as<double>();
+    stop.longitude = item["longitude"].as<double>();
+    stop.radius = item["radius"].as<double>();
     if (stop.radius <= 0) stop.radius = 40.0;
+    stop.name = item["name"].as<String>();
+    if (stop.name.isEmpty()) stop.name = stop.id;
     if (++count >= 30) break;
   }
   routeStopCount = count;
   currentStopIndex = -1;
+  for (int i = 0; i < routeStopCount; ++i) {
+    if (routeStops[i].id == previousStopId) {
+      currentStopIndex = i;
+      break;
+    }
+  }
+  expectedOffboardingCount = 0;
   updateCurrentStop();
-}
-
-void syncVehicleData() {
-  if (WiFi.status() != WL_CONNECTED || !firebaseTokenReady()) return;
-  BearSSL::WiFiClientSecure client;
-  BearSSL::X509List trustAnchor(FIREBASE_ROOT_CA);
-  client.setTrustAnchors(&trustAnchor);
-  client.setTimeout(12000);
-  const String url = String("https://firestore.googleapis.com/v1/projects/") +
-      FIREBASE_PROJECT_ID + "/databases/(default)/documents/vehicles/" +
-      VEHICLE_DOCUMENT_ID;
-  HTTPClient http;
-  if (!http.begin(client, url)) return;
-  http.setTimeout(12000);
-  http.addHeader("Authorization", "Bearer " + firebaseIdToken);
-  const int code = http.GET();
-  const String response = code == 200 ? http.getString() : "";
-  http.end();
-  if (code == 401) firebaseIdToken = "";
-  if (code != 200) {
-    Serial.printf("Firestore vehicle sync failed (HTTP %d)\n", code);
-    return;
-  }
-  JsonDocument document;
-  if (deserializeJson(document, response)) return;
-  String status = document["fields"]["status"]["stringValue"].as<String>();
-  status.toUpperCase();
-  if (status == "ACTIVE" || status == "IDLE" || status == "BREAK") {
-    vehicleStatus = status;
-  }
-  onboardCount = document["fields"]["onBoardPassengers"]["integerValue"].as<String>().toInt();
-  outboardCount = document["fields"]["outBoardPassengers"]["integerValue"].as<String>().toInt();
-  expectedOffCount = 0;
-  if (currentStopIndex >= 0) {
-    const String routeId = routeStops[currentStopIndex].id;
-    expectedOffCount = document["fields"]["expectedOutboardByStop"]["mapValue"]["fields"][routeId]["integerValue"].as<String>().toInt();
-  }
+  updateGpsDisplaySnapshot();
   drawCurrentLCDPage();
 }
 
-void uploadVehicleLocation() {
-  if (!gpsHasFix || WiFi.status() != WL_CONNECTED || !firebaseTokenReady()) return;
-
-  char gpsTimestamp[25];
-  const time_t nowUtc = time(nullptr);
-  struct tm* utc = gmtime(&nowUtc);
-  if (utc == nullptr ||
-      strftime(gpsTimestamp, sizeof(gpsTimestamp), "%Y-%m-%dT%H:%M:%SZ", utc) == 0) {
-    Serial.println("GPS upload skipped: clock unavailable");
-    return;
-  }
-
-  String body;
-  {
-    JsonDocument payload;
-    payload["fields"]["location"]["geoPointValue"]["latitude"] = gpsLatitude;
-    payload["fields"]["location"]["geoPointValue"]["longitude"] = gpsLongitude;
-    payload["fields"]["latitude"]["doubleValue"] = gpsLatitude;
-    payload["fields"]["longitude"]["doubleValue"] = gpsLongitude;
-    payload["fields"]["speedKmh"]["doubleValue"] = gpsSpeedKmh;
-    payload["fields"]["currentStopRouteId"]["stringValue"] =
-        currentStopIndex >= 0 ? routeStops[currentStopIndex].id : "";
-    payload["fields"]["lastGpsAt"]["timestampValue"] = gpsTimestamp;
-    serializeJson(payload, body);
-  }
-  if (body.isEmpty()) {
-    Serial.println("GPS upload skipped: JSON allocation failed");
-    return;
-  }
-
-  BearSSL::WiFiClientSecure client;
-  BearSSL::X509List trustAnchor(FIREBASE_ROOT_CA);
-  client.setTrustAnchors(&trustAnchor);
-  client.setTimeout(12000);
-
-  // updateMask preserves registration data, and exists=true prevents creating
-  // a second vehicle if the configured document ID is wrong or was deleted.
-  const String url = String("https://firestore.googleapis.com/v1/projects/") +
-      FIREBASE_PROJECT_ID + "/databases/(default)/documents/vehicles/" +
-      VEHICLE_DOCUMENT_ID +
-      "?updateMask.fieldPaths=location&updateMask.fieldPaths=latitude" +
-      "&updateMask.fieldPaths=longitude&updateMask.fieldPaths=speedKmh" +
-      "&updateMask.fieldPaths=currentStopRouteId" +
-      "&updateMask.fieldPaths=lastGpsAt" +
-      "&currentDocument.exists=true";
-
-  HTTPClient http;
-  if (!http.begin(client, url)) return;
-  http.setTimeout(12000);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", "Bearer " + firebaseIdToken);
-
-  int code = http.PATCH(body);
-  http.end();
-  if (code == 200) {
-    Serial.printf("Vehicle GPS uploaded to Firestore vehicles/%s at %s\n",
-                  VEHICLE_DOCUMENT_ID, gpsTimestamp);
-  } else {
-    Serial.printf("Firestore GPS upload failed (HTTP %d)\n", code);
-    if (code == 401) firebaseIdToken = "";
-  }
+void syncFuelingLocationsRelay() {
+  JsonDocument request, response;
+  request["op"] = "fueling";
+  if (!relayRequest(request, response)) return;
+  JsonVariant entrance = response["entrance"];
+  JsonVariant exit = response["exit"];
+  if (entrance.isNull() || exit.isNull()) return;
+  FuelingGate nextEntrance = {entrance["latitude"].as<double>(),
+      entrance["longitude"].as<double>(), entrance["radius"].as<double>()};
+  FuelingGate nextExit = {exit["latitude"].as<double>(),
+      exit["longitude"].as<double>(), exit["radius"].as<double>()};
+  if (!isfinite(nextEntrance.latitude) || !isfinite(nextEntrance.longitude) ||
+      !isfinite(nextExit.latitude) || !isfinite(nextExit.longitude) ||
+      nextEntrance.radius <= 0 || nextExit.radius <= 0 ||
+      (nextEntrance.latitude == 0 && nextEntrance.longitude == 0) ||
+      (nextExit.latitude == 0 && nextExit.longitude == 0)) return;
+  fuelingEntrance = nextEntrance;
+  fuelingExit = nextExit;
+  fuelingLocationsLoaded = true;
+  updateJeepneyStatus();
+  updateCurrentStop();
+  Serial.println("Fueling entrance, exit, and radii loaded from Firebase settings");
 }
+
+void syncVehicleDataRelay() {
+  JsonDocument request, response;
+  request["op"] = "vehicle";
+  if (!relayRequest(request, response)) return;
+  dbVehicleType = response["type"].as<String>();
+  if (dbVehicleType.isEmpty()) dbVehicleType = "--";
+  dbVehicleStatus = response["status"].as<String>();
+  dbVehicleStatus.toUpperCase();
+  dbLocationLabel = response["locationLabel"].as<String>();
+  onboardCount = response["onboard"].as<int>();
+  expectedOffboardingCount = 0;
+  const int step = routeMovingTowardLastStop ? 1 : -1;
+  const int candidate = currentStopIndex + step;
+  const int nextStopIndex = currentStopIndex >= 0 &&
+      candidate >= 0 && candidate < routeStopCount
+      ? candidate : getEtaTargetStopIndex();
+  if (nextStopIndex >= 0) {
+    const String routeId = routeStops[nextStopIndex].id;
+    expectedOffboardingCount = response["expected"][routeId].as<int>();
+  }
+  vehicleDataLoaded = true;
+  drawCurrentLCDPage();
+}
+
+void uploadVehicleLocationRelay() {
+  if (!gpsHasFix) return;
+  JsonDocument request, response;
+  request["op"] = "gps";
+  request["latitude"] = gpsLatitude;
+  request["longitude"] = gpsLongitude;
+  request["speedKmh"] = gpsSpeedKmh;
+  request["type"] = VEHICLE_TYPE;
+  if (routeStopCount > 1) request["routeDirection"] =
+      routeMovingTowardLastStop ? "towardLastStop" : "towardFirstStop";
+  String locationLabel = getLocationDisplayText();
+  locationLabel.replace("\r", " ");
+  locationLabel.replace("\n", " ");
+  if (locationLabel.length() > 40) locationLabel = locationLabel.substring(0, 40);
+  request["locationLabel"] = locationLabel;
+  request["status"] = vehicleStatus == "FUELING GAS" ? "fueling gas" :
+                      vehicleStatus == "BREAK" ? "break" : "active";
+  if (!relayRequest(request, response)) {
+    setCloudStatus(CloudStatus::uploadFailed);
+    return;
+  }
+  lastSuccessfulGpsUpload = millis();
+  setCloudStatus(CloudStatus::connected);
+  Serial.println("Vehicle GPS uploaded through SIM808 relay");
+}
+
+
+
 
 // =====================================================
 // SETUP
@@ -1156,88 +1943,168 @@ void uploadVehicleLocation() {
 void setup() {
   Serial.begin(115200);
   delay(500);
+  Serial.println("ESP8266 reset reason: " + ESP.getResetReason());
+
+
+
 
   Serial.println();
   Serial.println("SIM808 GPS Tracker Starting");
 
+
+
+
+
+
   // LCD I2C: SDA D2, SCL D1.
   Wire.begin(D2, D1);
+
+
+
 
   lcd.begin();
   lcd.clear();
 
-  jeepneyStatus = "STARTING";
-  displayJeepInformation();
+
+
+
+  displayWelcomeScreen();
+  displayGPSLocation();
+
+
+
 
   // SIM808 communicates at 9600 baud.
   sim808.begin(9600);
   delay(2000);
 
-  connectWiFi();
-  syncRouteStops();
-  syncVehicleData();
 
+
+
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed; GPS cache is unavailable");
+  } else {
+    loadGpsCache();
+    loadFuelingTripState();
+    loadRouteDirection();
+  }
+
+
+
+
+
+
+
+
+  updateGpsDisplaySnapshot();
   initializeSIM808();
 
+
+
+
   if (sim808Available) {
-    jeepneyStatus = "GPS STARTING";
     drawCurrentLCDPage();
+
+
+
 
     startGPS();
 
+
+
+
     delay(2000);
+
+
+
 
     fetchGPS();
     updateCurrentStop();
-    uploadVehicleLocation();
+    if (gpsHasFix) updateGpsDisplaySnapshot();
+    uploadVehicleLocationRelay();
     lastGPSUpload = millis();
-  } else {
-    jeepneyStatus = "SIM ERROR";
   }
 
-  lastGPSRequest = millis();
-  lastGPSWatchdog = millis();
-  lastLCDPageSwitch = millis();
 
+
+
+  // GPS upload gets first use of the network and heap. Optional reads run later.
+
+
+
+
+  lastGPSRequest = millis();
+  lastLCDPageSwitch = millis();
   lcdPage = 0;
   drawCurrentLCDPage();
 }
+
+
+
 
 // =====================================================
 // MAIN LOOP
 // =====================================================
 void loop() {
-  maintainWiFi();
-  if (millis() - lastRouteSync >= ROUTE_SYNC_INTERVAL) {
-    lastRouteSync = millis();
-    syncRouteStops();
-  }
-  if (millis() - lastVehicleSync >=
-      (currentStopIndex >= 0 ? STOP_VEHICLE_SYNC_INTERVAL : VEHICLE_SYNC_INTERVAL)) {
-    lastVehicleSync = millis();
-    syncVehicleData();
+  maintainCellularData();
+  if (cloudStatus == CloudStatus::connected &&
+      millis() - lastSuccessfulGpsUpload > 30000) {
+    setCloudStatus(CloudStatus::uploadFailed);
   }
   retrySIM808();
-  keepGPSOn();
   updateLCDPages();
-
   if (sim808Available &&
       millis() - lastGPSRequest >=
       GPS_REQUEST_INTERVAL) {
     lastGPSRequest = millis();
 
+
+
+
     fetchGPS();
     updateCurrentStop();
+    if (gpsHasFix) updateGpsDisplaySnapshot();
     drawCurrentLCDPage();
   }
 
-  if (gpsHasFix && (stopTransitionPending ||
-      millis() - lastGPSUpload >= GPS_UPLOAD_INTERVAL)) {
+
+
+
+  if (gpsHasFix && millis() - lastGPSUpload >= GPS_UPLOAD_INTERVAL) {
     lastGPSUpload = millis();
-    uploadVehicleLocation();
-    stopTransitionPending = false;
-    updateLCDPages();
+    uploadVehicleLocationRelay();
   }
 
+
+
+
+  if (cloudStatus == CloudStatus::connected &&
+      (lastRouteSync == 0 || millis() - lastRouteSync >=
+          (routeStopCount > 0 ? ROUTE_SYNC_INTERVAL : ROUTE_RETRY_INTERVAL))) {
+    lastRouteSync = millis();
+    syncRouteStopsRelay();
+  }
+
+  if (cloudStatus == CloudStatus::connected &&
+      (lastFuelingSync == 0 || millis() - lastFuelingSync >=
+          (fuelingLocationsLoaded ? FUELING_SYNC_INTERVAL : FUELING_RETRY_INTERVAL))) {
+    lastFuelingSync = millis();
+    syncFuelingLocationsRelay();
+  }
+
+
+
+
+  if (cloudStatus == CloudStatus::connected &&
+      millis() - lastVehicleSync >=
+          (currentStopIndex >= 0
+               ? STOP_VEHICLE_SYNC_INTERVAL
+               : VEHICLE_SYNC_INTERVAL)) {
+    lastVehicleSync = millis();
+    syncVehicleDataRelay();
+  }
+
+
+  updateLCDPages();
   yield();
 }

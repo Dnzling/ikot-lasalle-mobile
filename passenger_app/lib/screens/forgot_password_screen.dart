@@ -11,15 +11,11 @@ class ForgotPasswordScreen extends StatefulWidget {
 
 class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _first = TextEditingController();
-  final _last = TextEditingController();
   final _email = TextEditingController();
   bool _submitting = false;
 
   @override
   void dispose() {
-    _first.dispose();
-    _last.dispose();
     _email.dispose();
     super.dispose();
   }
@@ -29,8 +25,6 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     setState(() => _submitting = true);
     try {
       await const PassengerFirebaseService().sendPasswordResetLink(
-        firstName: _first.text,
-        lastName: _last.text,
         email: _email.text,
       );
       if (!mounted) return;
@@ -40,7 +34,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         builder: (context) => AlertDialog(
           title: const Text('Check your email'),
           content: const Text(
-            'If the passenger name and verified email match, Firebase has sent a password-reset link. Open it to choose a new password, then return here and sign in.',
+            'If this email is linked to an account, a password-reset link has been sent. Open it to choose a new password, then return here and sign in.',
           ),
           actions: [
             FilledButton(
@@ -77,14 +71,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Enter the first name, last name, and email you verified in your passenger account. Firebase will email a secure reset link.',
+              'Enter the email address linked to your account. We will send a password-reset link.',
             ),
             const SizedBox(height: 24),
-            _field(_first, 'First name'),
-            _field(_last, 'Last name'),
             _field(
               _email,
-              'Verified email address',
+              'Email address',
               keyboardType: TextInputType.emailAddress,
             ),
             const SizedBox(height: 12),
@@ -109,10 +101,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     child: TextFormField(
       controller: controller,
       keyboardType: keyboardType,
-      textCapitalization: keyboardType == null
-          ? TextCapitalization.words
-          : TextCapitalization.none,
-      autocorrect: keyboardType == TextInputType.emailAddress ? false : true,
+      textCapitalization: TextCapitalization.none,
+      autocorrect: false,
       validator: (value) {
         if (value == null || value.trim().isEmpty) return '$label is required.';
         if (keyboardType == TextInputType.emailAddress &&

@@ -7,7 +7,28 @@ service firebase.storage {
                    && request.auth.uid == userId
                    && request.resource.size < 3 * 1024 * 1024
                    && request.resource.contentType.matches('image/.*');
-      allow read: if request.auth != null;
+      allow read: if request.auth != null &&
+                  (request.auth.uid == userId ||
+                   firestore.get(
+                     /databases/(default)/documents/users/$(request.auth.uid)
+                   ).data.userType == 'Admin');
+    }
+
+    match /drivers/{driverId}/{fileName} {
+      allow read: if request.auth != null
+                  && firestore.get(
+                       /databases/(default)/documents/users/$(request.auth.uid)
+                     ).data.userType == 'Admin';
+      allow write: if request.auth != null
+                   && firestore.get(
+                        /databases/(default)/documents/users/$(request.auth.uid)
+                      ).data.userType == 'Admin'
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null
+                    && firestore.get(
+                         /databases/(default)/documents/users/$(request.auth.uid)
+                       ).data.userType == 'Admin';
     }
   }
 }

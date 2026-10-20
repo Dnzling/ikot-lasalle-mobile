@@ -1,0 +1,212 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.get('userType', '') in ['Admin', 'admin'] &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.get('active', true) == true;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isInitialAdminClaim(uid, idNumber) {
+      let bootstrapPath = /databases/$(database)/documents/system/adminBootstrap;
+      return signedIn() && request.auth.uid == uid &&
+        existsAfter(bootstrapPath) &&
+        getAfter(bootstrapPath).data.uid == request.auth.uid &&
+        getAfter(bootstrapPath).data.idNumber == idNumber;
+    }
+
+    function isInitialAdminAlias(idNumber) {
+      let aliasPath = /databases/$(database)/documents/loginAliases/$(idNumber);
+      return signedIn() && !exists(aliasPath) &&
+        isInitialAdminClaim(request.auth.uid, idNumber) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.idNumber == idNumber &&
+        request.resource.data.userType == 'Admin';
+    }
+
+    function activePassenger() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.get('active', true) == true;
+    }
+
+    match /system/{documentId} {
+      allow get: if documentId == 'adminBootstrap';
+      allow list: if false;
+      allow create: if documentId == 'adminBootstrap' && signedIn() &&
+        !exists(/databases/$(database)/documents/system/$(documentId)) &&
+        request.resource.data.keys().hasOnly(['uid', 'idNumber', 'createdAt']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.idNumber is string &&
+        request.resource.data.idNumber.matches('^[A-Za-z0-9]+$');
+      allow update, delete: if false;
+    }
+
+    // The public lookup contains only a login email and UID. It cannot be
+    // queried as a list and only an administrator may change mappings.
+    match /loginAliases/{idNumber} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if isInitialAdminAlias(idNumber) || isAdmin() ||
+        (signedIn() && request.auth.token.email_verified == true &&
+         request.resource.data.uid == request.auth.uid &&
+         request.resource.data.email == request.auth.token.email &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid))
+           .data.idNumber == idNumber &&
+         (!exists(/databases/$(database)/documents/loginAliases/$(idNumber)) ||
+           resource.data.uid == request.auth.uid));
+      allow delete: if isAdmin();
+    }
+
+    match /users/{uid} {
+      allow get: if isAdmin() || isOwner(uid);
+      allow list: if isAdmin();
+      allow create: if
+        (isInitialAdminClaim(uid, request.resource.data.idNumber) &&
+         request.resource.data.userType == 'Admin' &&
+         request.resource.data.active == true) || isAdmin() ||
+        (isOwner(uid) &&
+         request.resource.data.userType == 'Student' &&
+         request.resource.data.balance == 0 &&
+         request.resource.data.active == true &&
+         request.resource.data.idNumber is string &&
+         request.resource.data.idNumber.matches('^[0-9]{9}$'));
+      allow update: if isAdmin() ||
+        (isOwner(uid) &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+           'firstName', 'lastName', 'phone', 'contactNumber',
+           'email', 'pendingEmail', 'emailVerified', 'emailVerifiedAt',
+           'emailVerificationSentAt', 'session', 'mustChangePassword',
+           'passwordChangedAt', 'updatedAt'
+         ]) &&
+         (!request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['emailVerified', 'email']) ||
+          request.resource.data.get('emailVerified', false) != true ||
+           (request.auth.token.email_verified == true &&
+            request.resource.data.get('email', '') == request.auth.token.email)));
+      allow delete: if isAdmin();
+
+      match /sessions/{sessionId} {
+        allow read, write: if isAdmin() || isOwner(uid);
+      }
+    }
+
+    match /vehicles/{vehicleId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /routes/{routeId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /drivers/{driverId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow read: if isAdmin() ||
+        (signedIn() && settingId in ['fares', 'payment', 'credits']);
+      allow write: if isAdmin();
+    }
+
+    match /trips/{tripId} {
+      allow get, list: if isAdmin() ||
+        (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() ||
+        (activePassenger() &&
+         request.resource.data.userId == request.auth.uid &&
+         request.resource.data.status == 'waiting' &&
+         request.resource.data.passengerCount is int &&
+         request.resource.data.passengerCount >= 1 &&
+         request.resource.data.passengerCount <= 6 &&
+         request.resource.data.get('boardedAt', null) == null &&
+         request.resource.data.get('completedAt', null) == null);
+      allow update: if isAdmin() ||
+        (activePassenger() && resource.data.userId == request.auth.uid &&
+         ((resource.data.status == 'waiting' &&
+           request.resource.data.status == 'canceled' &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'status', 'cancelReason', 'canceledAt'
+           ]) && request.resource.data.canceledAt == request.time) ||
+          (resource.data.status == 'onboard' &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'phoneLocation', 'phoneGpsAt', 'phoneGpsAccuracyMeters'
+           ]) && request.resource.data.phoneGpsAt == request.time &&
+           request.resource.data.phoneGpsAccuracyMeters is number &&
+           request.resource.data.phoneGpsAccuracyMeters >= 0 &&
+           request.resource.data.phoneGpsAccuracyMeters <= 30)));
+      allow delete: if isAdmin();
+    }
+
+    match /topUpRequests/{requestId} {
+      allow get, list: if isAdmin() ||
+        (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() ||
+        (activePassenger() &&
+         request.resource.data.userId == request.auth.uid &&
+         request.resource.data.status == 'pending' &&
+         request.resource.data.amount is number &&
+         request.resource.data.amount > 0 &&
+         request.resource.data.amount <= 10000 &&
+         request.resource.data.amount >= (
+           exists(/databases/$(database)/documents/settings/credits)
+             ? get(/databases/$(database)/documents/settings/credits)
+                 .data.get('minimumTopUpCredits', 1)
+             : 1) &&
+         request.resource.data.referenceNumber is string &&
+         request.resource.data.referenceNumber.matches('^[0-9]{13}$') &&
+         request.resource.data.get('reviewedAt', null) == null &&
+         request.resource.data.get('creditedAt', null) == null);
+      allow update, delete: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow get, list: if isAdmin() ||
+        (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow get, list: if isAdmin() ||
+        (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() ||
+        (activePassenger() &&
+         request.resource.data.userId == request.auth.uid &&
+         request.resource.data.type in ['booking', 'topUp']);
+      allow update, delete: if isAdmin();
+    }
+
+    match /adminNotificationReads/{readId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin() &&
+        request.resource.data.adminId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /adminAuditLogs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /exportLogs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /passwordResetRequests/{requestId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

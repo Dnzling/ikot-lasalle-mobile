@@ -21,6 +21,8 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
   List<AdminAlert> latestAlerts = const [];
   Timer? refreshTimer;
   final readAlertIds = <String>{};
+  bool readStateLoaded = false;
+  late final Future<void> readStateFuture;
 
   String get readKey =>
       'admin.notifications.read.${FirebaseService.instance.auth.currentUser?.uid ?? 'unknown'}';
@@ -32,21 +34,30 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
     alertsFuture.then((alerts) {
       if (mounted) setState(() => latestAlerts = alerts);
     });
-    _loadReadAlerts();
+    readStateFuture = _loadReadAlerts();
     refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _refresh();
     });
   }
 
-  void _loadReadAlerts() {
+  Future<void> _loadReadAlerts() async {
     try {
       final saved = readNotificationState(readKey);
-      if (saved == null) return;
-      final ids = (jsonDecode(saved) as List<dynamic>).whereType<String>();
-      readAlertIds.addAll(ids);
+      if (saved != null) {
+        final ids = (jsonDecode(saved) as List<dynamic>).whereType<String>();
+        readAlertIds.addAll(ids);
+      }
     } catch (_) {
       // Notifications remain usable if local storage is unavailable.
     }
+    try {
+      readAlertIds.addAll(
+        await FirebaseService.instance.getReadAdminAlertIds(),
+      );
+    } catch (_) {
+      // Local state remains available if the account is offline.
+    }
+    if (mounted) setState(() => readStateLoaded = true);
   }
 
   void _markAsRead(AdminAlert alert) {
@@ -55,7 +66,16 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
       readAlertIds.add(alert.id);
     });
     _refresh();
+    unawaited(_persistReadAlerts([alert.id]));
+  }
+
+  Future<void> _persistReadAlerts(Iterable<String> alertIds) async {
     writeNotificationState(readKey, jsonEncode(readAlertIds.toList()));
+    try {
+      await FirebaseService.instance.markAdminAlertsRead(alertIds);
+    } catch (_) {
+      // Retain local state for this session if the network write fails.
+    }
   }
 
   void _refresh() {
@@ -77,6 +97,8 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
   }
 
   Future<void> _open() async {
+    await readStateFuture;
+    if (!mounted) return;
     final future = alertsFuture;
     future.then((alerts) {
       if (!mounted) return;
@@ -84,7 +106,7 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
         latestAlerts = alerts;
         readAlertIds.addAll(alerts.map((alert) => alert.id));
       });
-      writeNotificationState(readKey, jsonEncode(readAlertIds.toList()));
+      unawaited(_persistReadAlerts(alerts.map((alert) => alert.id)));
     });
     await showDialog<void>(
       context: context,
@@ -101,11 +123,12 @@ class _AdminNotificationButtonState extends State<AdminNotificationButton> {
   Widget build(BuildContext context) => FutureBuilder<List<AdminAlert>>(
     future: alertsFuture,
     builder: (context, snapshot) {
-      final count =
-          snapshot.data
-              ?.where((alert) => !readAlertIds.contains(alert.id))
-              .length ??
-          0;
+      final count = readStateLoaded
+          ? snapshot.data
+                    ?.where((alert) => !readAlertIds.contains(alert.id))
+                    .length ??
+                0
+          : 0;
       return IconButton(
         tooltip: 'Admin notifications',
         onPressed: _open,

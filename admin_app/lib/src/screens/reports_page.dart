@@ -16,7 +16,7 @@ class ReportsPage extends StatelessWidget {
       children: [
         const PageIntro(
           title: 'Reports & exports',
-          subtitle: 'Filter, review, and export live Firebase records.',
+          subtitle: 'Filter, review, and export live records.',
         ),
         const SizedBox(height: 22),
         _ReportSection(
@@ -107,6 +107,11 @@ class VehicleDailyPerformance extends StatefulWidget {
 
 class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
   DateTimeRange? range;
+
+  Future<void> _chooseDates() async {
+    final result = await _showReportDateFilter(context, range);
+    if (result != null && mounted) setState(() => range = result.range);
+  }
   static const headers = [
     'Date',
     'Vehicle',
@@ -117,26 +122,17 @@ class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
     'Net after salary',
   ];
 
-  Future<void> export(List<List<String>> rows, bool pdf) async {
+  Future<void> export(List<List<String>> rows) async {
     try {
-      if (pdf) {
-        await ExportService.pdf(
-          fileName: 'vehicle_daily_performance.pdf',
-          title: 'Vehicle daily performance',
-          headers: headers,
-          rows: rows,
-        );
-      } else {
-        await ExportService.excel(
-          fileName: 'vehicle_daily_performance.xlsx',
-          title: 'Vehicle daily performance',
-          headers: headers,
-          rows: rows,
-        );
-      }
+      await ExportService.pdf(
+        fileName: 'vehicle_daily_performance.pdf',
+        title: 'Vehicle daily performance',
+        headers: headers,
+        rows: rows,
+      );
       await FirebaseService.instance.logExportActivity(
         report: 'Vehicle daily performance',
-        format: pdf ? 'PDF' : 'Excel',
+        format: 'PDF',
         rowCount: rows.length,
       );
     } catch (error) {
@@ -191,7 +187,7 @@ class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
                 if (vehicleId.isEmpty) continue;
                 final time = trip['boardedAt'];
                 if (time is! Timestamp) continue;
-                final date = time.toDate();
+                final date = time.toDate().toLocal();
                 if (range != null &&
                     (date.isBefore(
                           DateTime(
@@ -208,6 +204,7 @@ class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
                             23,
                             59,
                             59,
+                            999,
                           ),
                         ))) {
                   continue;
@@ -271,57 +268,13 @@ class _VehicleDailyPerformanceState extends State<VehicleDailyPerformance> {
                         spacing: 8,
                         runSpacing: 8,
                         children: [
-                          OutlinedButton(
-                            onPressed: () => setState(
-                              () => range = DateTimeRange(
-                                start: DateTime.now(),
-                                end: DateTime.now(),
-                              ),
-                            ),
-                            child: const Text('Today'),
-                          ),
-                          OutlinedButton(
-                            onPressed: () => setState(
-                              () => range = DateTimeRange(
-                                start: DateTime.now().subtract(
-                                  const Duration(days: 6),
-                                ),
-                                end: DateTime.now(),
-                              ),
-                            ),
-                            child: const Text('Last 7 days'),
-                          ),
-                          OutlinedButton(
-                            onPressed: () async {
-                              final chosen = await showDateRangePicker(
-                                context: context,
-                                firstDate: DateTime(2020),
-                                lastDate: DateTime(DateTime.now().year + 1),
-                              );
-                              if (chosen != null)
-                                setState(() => range = chosen);
-                            },
-                            child: Text(
-                              range == null
-                                  ? 'Custom dates'
-                                  : '${_shortDate(range!.start)} - ${_shortDate(range!.end)}',
-                            ),
-                          ),
-                          if (range != null)
-                            TextButton(
-                              onPressed: () => setState(() => range = null),
-                              child: const Text('Clear'),
-                            ),
-                          OutlinedButton(
-                            onPressed: rows.isEmpty
-                                ? null
-                                : () => export(rows, false),
-                            child: const Text('Excel'),
+                          OutlinedButton.icon(
+                            onPressed: _chooseDates,
+                            icon: const Icon(Icons.date_range_outlined),
+                            label: Text(_dateFilterLabel(range)),
                           ),
                           FilledButton(
-                            onPressed: rows.isEmpty
-                                ? null
-                                : () => export(rows, true),
+                            onPressed: rows.isEmpty ? null : () => export(rows),
                             child: const Text('PDF'),
                           ),
                         ],
@@ -385,43 +338,28 @@ class _ReportSectionState extends State<_ReportSection> {
 
   DateTime? _dateOf(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
     final value = doc.data()['createdAt'] ?? doc.data()['submittedAt'];
-    if (value is Timestamp) return value.toDate();
-    return value is DateTime ? value : null;
+    if (value is Timestamp) return value.toDate().toLocal();
+    return value is DateTime ? value.toLocal() : null;
   }
 
   Future<void> _chooseDates() async {
-    final now = DateTime.now();
-    final chosen = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(now.year + 1, 12, 31),
-      initialDateRange: range,
-    );
-    if (chosen != null) setState(() => range = chosen);
+    final result = await _showReportDateFilter(context, range);
+    if (result != null && mounted) setState(() => range = result.range);
   }
 
-  Future<void> _export(List<List<String>> rows, bool asPdf) async {
+  Future<void> _export(List<List<String>> rows) async {
     try {
       final stamp = DateTime.now().toIso8601String().substring(0, 10);
-      if (asPdf) {
-        await ExportService.pdf(
-          fileName: '${widget.collection}_history_$stamp.pdf',
-          title: widget.title,
-          headers: widget.headers,
-          rows: rows,
-        );
-      } else {
-        await ExportService.excel(
-          fileName: '${widget.collection}_history_$stamp.xlsx',
-          title: widget.title,
-          headers: widget.headers,
-          rows: rows,
-        );
-      }
+      await ExportService.pdf(
+        fileName: '${widget.collection}_history_$stamp.pdf',
+        title: widget.title,
+        headers: widget.headers,
+        rows: rows,
+      );
       try {
         await FirebaseService.instance.logExportActivity(
           report: widget.title,
-          format: asPdf ? 'PDF' : 'Excel',
+          format: 'PDF',
           rowCount: rows.length,
         );
       } catch (_) {}
@@ -508,58 +446,13 @@ class _ReportSectionState extends State<_ReportSection> {
                       ],
                     ),
                   ),
-                  OutlinedButton(
-                    onPressed: () => setState(
-                      () => range = DateTimeRange(
-                        start: DateTime.now(),
-                        end: DateTime.now(),
-                      ),
-                    ),
-                    child: const Text('Today'),
-                  ),
-                  OutlinedButton(
-                    onPressed: () => setState(
-                      () => range = DateTimeRange(
-                        start: DateTime.now().subtract(const Duration(days: 6)),
-                        end: DateTime.now(),
-                      ),
-                    ),
-                    child: const Text('Last 7 days'),
-                  ),
-                  OutlinedButton(
-                    onPressed: () => setState(
-                      () => range = DateTimeRange(
-                        start: DateTime.now().subtract(
-                          const Duration(days: 29),
-                        ),
-                        end: DateTime.now(),
-                      ),
-                    ),
-                    child: const Text('Last 30 days'),
-                  ),
                   OutlinedButton.icon(
                     onPressed: _chooseDates,
                     icon: const Icon(Icons.date_range_outlined),
-                    label: Text(
-                      range == null
-                          ? 'All dates'
-                          : '${_shortDate(range!.start)} - ${_shortDate(range!.end)}',
-                    ),
+                    label: Text(_dateFilterLabel(range)),
                   ),
-                  if (range != null)
-                    IconButton(
-                      tooltip: 'Clear date filter',
-                      onPressed: () => setState(() => range = null),
-                      icon: const Icon(Icons.close),
-                    ),
-                  OutlinedButton.icon(
-                    onPressed: rows.isEmpty ? null : () => _export(rows, false),
-                    icon: const Icon(Icons.table_view_outlined),
-                    label: const Text('Excel'),
-                  ),
-                  const SizedBox(width: 8),
                   FilledButton.icon(
-                    onPressed: rows.isEmpty ? null : () => _export(rows, true),
+                    onPressed: rows.isEmpty ? null : () => _export(rows),
                     icon: const Icon(Icons.picture_as_pdf_outlined),
                     label: const Text('PDF'),
                   ),
@@ -641,6 +534,101 @@ class _ReportSectionState extends State<_ReportSection> {
 }
 
 String _shortDate(DateTime date) => '${date.month}/${date.day}/${date.year}';
+
+String _dateFilterLabel(DateTimeRange? range) => range == null
+    ? 'Filter dates'
+    : '${_shortDate(range.start)} - ${_shortDate(range.end)}';
+
+Future<({DateTimeRange? range})?> _showReportDateFilter(
+  BuildContext context,
+  DateTimeRange? currentRange,
+) {
+  DateTimeRange? selected = currentRange;
+  String preset = currentRange == null ? 'All dates' : 'Custom';
+  return showDialog<({DateTimeRange? range})>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (dialogContext, refresh) => AlertDialog(
+        title: const Text('Filter by date'),
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Choose which dates to show in this report.'),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final option in const [
+                    'All dates',
+                    'Today',
+                    'Last 7 days',
+                    'Last 30 days',
+                  ])
+                    ChoiceChip(
+                      label: Text(option),
+                      selected: preset == option,
+                      onSelected: (_) => refresh(() {
+                        preset = option;
+                        final today = DateTime.now();
+                        selected = switch (option) {
+                          'Today' => DateTimeRange(start: today, end: today),
+                          'Last 7 days' => DateTimeRange(
+                            start: today.subtract(const Duration(days: 6)),
+                            end: today,
+                          ),
+                          'Last 30 days' => DateTimeRange(
+                            start: today.subtract(const Duration(days: 29)),
+                            end: today,
+                          ),
+                          _ => null,
+                        };
+                      }),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final now = DateTime.now();
+                  final picked = await showDateRangePicker(
+                    context: dialogContext,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(now.year + 1, 12, 31),
+                    initialDateRange: selected,
+                  );
+                  if (picked != null && dialogContext.mounted) {
+                    refresh(() {
+                      selected = picked;
+                      preset = 'Custom';
+                    });
+                  }
+                },
+                icon: const Icon(Icons.date_range_outlined),
+                label: Text(preset == 'Custom' && selected != null
+                    ? _dateFilterLabel(selected)
+                    : 'Custom date range'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, (range: selected)),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
 
 /// DataTable requires every row to have exactly one cell per column.
 List<String> normalizeReportCells(List<String> cells, int columnCount) => [

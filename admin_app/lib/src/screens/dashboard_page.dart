@@ -200,7 +200,11 @@ class _DashboardPageState extends State<DashboardPage> {
                         ],
                       ),
                       const SizedBox(height: 24),
-                      MiniChart(values: _revenueChartValues(), height: 205),
+                      MiniChart(
+                        values: _revenueValues(),
+                        labels: _revenueLabels(),
+                        height: 205,
+                      ),
                       const SizedBox(height: 10),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -246,7 +250,7 @@ class _DashboardPageState extends State<DashboardPage> {
                               ),
                             ),
                             const Text(
-                              'fare revenue today',
+                              'fare revenue today • 100%',
                               style: TextStyle(color: Colors.black45),
                             ),
                           ],
@@ -256,19 +260,22 @@ class _DashboardPageState extends State<DashboardPage> {
                       _Legend(
                         color: const Color(0xFF08783E),
                         label: 'Traditional Jeep',
-                        value: 'PHP ${_todayByType().$2.toStringAsFixed(2)}',
+                        value:
+                            'PHP ${_todayByType().$2.toStringAsFixed(2)} • ${_revenueShare(_todayByType().$2)}%',
                       ),
                       const SizedBox(height: 14),
                       _Legend(
                         color: const Color(0xFF4FA9DD),
                         label: 'E-Jeep',
-                        value: 'PHP ${_todayByType().$3.toStringAsFixed(2)}',
+                        value:
+                            'PHP ${_todayByType().$3.toStringAsFixed(2)} • ${_revenueShare(_todayByType().$3)}%',
                       ),
                       const SizedBox(height: 12),
                       _Legend(
                         color: const Color(0xFF98A29B),
                         label: 'Vehicle type not recorded',
-                        value: 'PHP ${_todayByType().$4.toStringAsFixed(2)}',
+                        value:
+                            'PHP ${_todayByType().$4.toStringAsFixed(2)} • ${_revenueShare(_todayByType().$4)}%',
                       ),
                     ],
                   ),
@@ -354,16 +361,6 @@ class _DashboardPageState extends State<DashboardPage> {
     return values;
   }
 
-  List<double> _revenueChartValues() {
-    final values = _revenueValues();
-    final maximum = values.fold<double>(
-      0,
-      (current, value) => value > current ? value : current,
-    );
-    if (maximum == 0) return values;
-    return values.map((value) => value / maximum * 100).toList();
-  }
-
   List<String> _revenueLabels() => revenuePeriod == 'week'
       ? const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
       : List.generate(
@@ -398,6 +395,11 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
     return (jeep + eJeep + other, jeep, eJeep, other);
+  }
+
+  String _revenueShare(double amount) {
+    final total = _todayByType().$1;
+    return total == 0 ? '0.0' : (amount / total * 100).toStringAsFixed(1);
   }
 }
 
@@ -476,7 +478,13 @@ class _Legend extends StatelessWidget {
       ),
       const SizedBox(width: 8),
       Expanded(child: Text(label)),
-      Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
+      Flexible(
+        child: Text(
+          value,
+          textAlign: TextAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
     ],
   );
 }
@@ -493,7 +501,7 @@ class _TransactionHead extends StatelessWidget {
         Expanded(flex: 2, child: Text('USER', style: _head)),
         Expanded(child: Text('TYPE', style: _head)),
         Expanded(child: Text('AMOUNT', style: _head)),
-        SizedBox(width: 70, child: Text('STATUS', style: _head)),
+        SizedBox(width: 116, child: Text('STATUS', style: _head)),
       ],
     ),
   );
@@ -549,7 +557,7 @@ class _Transaction extends StatelessWidget {
           ),
         ),
         SizedBox(
-          width: 70,
+          width: 116,
           child: StatusPill(
             data.$6,
             good: !{

@@ -1,5 +1,4 @@
-// Firebase project shared with passenger_app. Re-run `flutterfire configure`
-// when a native Windows/macOS app registration is added to the project.
+// Firebase project configuration for Ikot La Salle Admin.
 // ignore_for_file: type=lint
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
@@ -13,8 +12,6 @@ class DefaultFirebaseOptions {
         return android;
       case TargetPlatform.iOS:
         return ios;
-      // The shared web app configuration works with the FlutterFire desktop
-      // implementations. A dedicated desktop app can replace this later.
       case TargetPlatform.windows:
       case TargetPlatform.macOS:
       case TargetPlatform.linux:
@@ -25,27 +22,28 @@ class DefaultFirebaseOptions {
   }
 
   static const web = FirebaseOptions(
-    apiKey: 'AIzaSyC0YXQ83GCutpozyK2wi0B3vH8V2zKt5IQ',
-    appId: '1:1002016926977:web:088673e7d0ebc19867ff00',
-    messagingSenderId: '1002016926977',
-    projectId: 'ikot-lasalle-ccfab',
-    authDomain: 'ikot-lasalle-ccfab.firebaseapp.com',
-    storageBucket: 'ikot-lasalle-ccfab.firebasestorage.app',
-    measurementId: 'G-0FDV8V5DWZ',
+    apiKey: 'AIzaSyDxSUzzgqvBXf4wq63cBFQSboyVBHisTEk',
+    appId: '1:896555643484:web:e9fdac23ce2307aa946c99',
+    messagingSenderId: '896555643484',
+    projectId: 'ikot-lasalle-2bed1',
+    authDomain: 'ikot-lasalle-2bed1.firebaseapp.com',
+    storageBucket: 'ikot-lasalle-2bed1.firebasestorage.app',
   );
+
   static const android = FirebaseOptions(
-    apiKey: 'AIzaSyAWl-gllrN2h1i5ePjEtAPBBTU6RUUuOSc',
-    appId: '1:1002016926977:android:a9dc37107d13602467ff00',
-    messagingSenderId: '1002016926977',
-    projectId: 'ikot-lasalle-ccfab',
-    storageBucket: 'ikot-lasalle-ccfab.firebasestorage.app',
+    apiKey: 'AIzaSyDb7ENHyRh983Pd2i_jD9mCeGlLmkFWvXI',
+    appId: '1:896555643484:android:09f5bc8e8bba6f2c946c99',
+    messagingSenderId: '896555643484',
+    projectId: 'ikot-lasalle-2bed1',
+    storageBucket: 'ikot-lasalle-2bed1.firebasestorage.app',
   );
+
   static const ios = FirebaseOptions(
-    apiKey: 'AIzaSyA7ImiWbgGLavpCnWRS_iYy-VRZd2NVasM',
-    appId: '1:1002016926977:ios:79d91eac0f3b7abf67ff00',
-    messagingSenderId: '1002016926977',
-    projectId: 'ikot-lasalle-ccfab',
-    storageBucket: 'ikot-lasalle-ccfab.firebasestorage.app',
-    iosBundleId: 'com.example.ikotLasalle',
+    apiKey: 'AIzaSyDxVtuwAg2v98l_rzQlnzvwA-4KXrQSLio',
+    appId: '1:896555643484:ios:aa4c5e003af71d02946c99',
+    messagingSenderId: '896555643484',
+    projectId: 'ikot-lasalle-2bed1',
+    storageBucket: 'ikot-lasalle-2bed1.firebasestorage.app',
+    iosBundleId: 'com.example.adminPage',
   );
 }

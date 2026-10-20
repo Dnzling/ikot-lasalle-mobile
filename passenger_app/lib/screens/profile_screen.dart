@@ -21,10 +21,11 @@ class ProfileScreen extends StatelessWidget {
             style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 24),
-          const CircleAvatar(
-            radius: 38,
-            backgroundColor: Color(0xFFE1F1E5),
-            child: Icon(Icons.person, color: Color(0xFF62A77D), size: 42),
+          Center(
+            child: Chip(
+              avatar: const Icon(Icons.badge_outlined, size: 18),
+              label: Text('User Type: ${session.passenger.userType}'),
+            ),
           ),
           const SizedBox(height: 12),
           Center(
@@ -142,6 +143,24 @@ class ProfileScreen extends StatelessWidget {
           const SizedBox(height: 12),
           OutlinedButton.icon(
             onPressed: () async {
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Log out?'),
+                  content: const Text('Are you sure you want to log out of your passenger account?'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext, false),
+                      child: const Text('Cancel'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(dialogContext, true),
+                      child: const Text('Log out'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirmed != true || !context.mounted) return;
               await const PassengerFirebaseService().signOut(
                 uid: session.uid,
                 sessionId: session.sessionId,

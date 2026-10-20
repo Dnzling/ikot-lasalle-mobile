@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../services/firebase_service.dart';
 import '../widgets/common.dart';
@@ -96,8 +98,39 @@ class _VehiclesPageState extends State<VehiclesPage> {
     return (latitude: value.latitude, longitude: value.longitude);
   }
 
+  MapLocation? _phoneMapLocation(String vehicleId, MapLocation? hardware,
+      Timestamp? hardwareAt, QuerySnapshot<Map<String, dynamic>>? trips) {
+    if (hardware == null || hardwareAt == null || trips == null ||
+        DateTime.now().difference(hardwareAt.toDate()) > const Duration(seconds: 120)) return null;
+    final candidates = trips.docs.where((doc) {
+      final data = doc.data();
+      return data['vehicleId'] == vehicleId && data['status'] == 'onboard' &&
+          data['phoneLocation'] is GeoPoint && data['phoneGpsAt'] is Timestamp &&
+          ((data['phoneGpsAccuracyMeters'] as num?)?.toDouble() ?? 999) <= 30;
+    }).toList()..sort((a, b) =>
+        ((a.data()['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
+            .compareTo((b.data()['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
+    for (final candidate in candidates) {
+      final data = candidate.data();
+      final at = (data['phoneGpsAt'] as Timestamp).toDate();
+      if (!at.isAfter(hardwareAt.toDate()) ||
+          DateTime.now().difference(at) > const Duration(seconds: 10)) continue;
+      final point = data['phoneLocation'] as GeoPoint;
+      final lat = point.latitude * math.pi / 180;
+      final hardwareLat = hardware.latitude * math.pi / 180;
+      final dLat = lat - hardwareLat;
+      final dLon = (point.longitude - hardware.longitude) * math.pi / 180;
+      final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+          math.cos(lat) * math.cos(hardwareLat) *
+          math.sin(dLon / 2) * math.sin(dLon / 2);
+      if (12742000 * math.asin(math.sqrt(a)) <= 500) {
+        return (latitude: point.latitude, longitude: point.longitude);
+      }
+    }
+    return null;
+  }
+
   void _register() {
-    final name = TextEditingController();
     final capacity = TextEditingController();
     final plateNumber = TextEditingController();
     var type = 'Jeep';
@@ -106,9 +139,6 @@ class _VehiclesPageState extends State<VehiclesPage> {
       title: 'Register vehicle',
       action: 'Register vehicle',
       fields: [
-        FormFieldBox('Vehicle name', controller: name),
-        FormFieldBox('Passenger capacity', controller: capacity),
-        FormFieldBox('Plate number', controller: plateNumber),
         DropdownButtonFormField<String>(
           initialValue: type,
           decoration: const InputDecoration(labelText: 'Type'),
@@ -118,33 +148,33 @@ class _VehiclesPageState extends State<VehiclesPage> {
           ],
           onChanged: (value) => type = value ?? type,
         ),
+        FormFieldBox('Passenger capacity', controller: capacity),
+        FormFieldBox('Plate number', controller: plateNumber, maxLength: 7),
       ],
       onSave: () async {
         final seats = int.tryParse(capacity.text);
-        if (name.text.trim().isEmpty ||
-            plateNumber.text.trim().isEmpty ||
-            seats == null ||
-            seats <= 0) {
-          _notice('Enter a vehicle name and positive capacity.');
+        if (seats == null || seats <= 0) {
+          _notice('Enter a positive passenger capacity.');
           return;
         }
         try {
           await FirebaseService.instance.addVehicle(
-            name: name.text,
+            name: '$type ${plateNumber.text.trim().toUpperCase()}',
             capacity: seats,
             plateNumber: plateNumber.text,
             type: type,
           );
           _notice('Vehicle registered.');
         } on FirebaseException catch (error) {
-          _notice('Firebase ${error.code}: ${error.message}');
+          _notice('Request ${error.code}: ${error.message}');
+        } on ArgumentError catch (error) {
+          _notice(error.message?.toString() ?? 'Invalid vehicle plate number.');
         }
       },
     );
   }
 
   Future<void> _editVehicle(String id, Map<String, dynamic> data) async {
-    final name = TextEditingController(text: '${data['name'] ?? ''}');
     final capacity = TextEditingController(
       text: '${data['passengerCapacity'] ?? ''}',
     );
@@ -165,12 +195,6 @@ class _VehiclesPageState extends State<VehiclesPage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  FormFieldBox('Vehicle name', controller: name),
-                  const SizedBox(height: 12),
-                  FormFieldBox('Passenger capacity', controller: capacity),
-                  const SizedBox(height: 12),
-                  FormFieldBox('Plate number', controller: plateNumber),
-                  const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     initialValue: type,
                     decoration: const InputDecoration(labelText: 'Type'),
@@ -180,6 +204,10 @@ class _VehiclesPageState extends State<VehiclesPage> {
                     ],
                     onChanged: (value) => type = value ?? type,
                   ),
+                  const SizedBox(height: 12),
+                  FormFieldBox('Passenger capacity', controller: capacity),
+                  const SizedBox(height: 12),
+                  FormFieldBox('Plate number', controller: plateNumber, maxLength: 7),
                   if (validationError != null) ...[
                     const SizedBox(height: 12),
                     Text(
@@ -199,13 +227,10 @@ class _VehiclesPageState extends State<VehiclesPage> {
             FilledButton(
               onPressed: () {
                 final seats = int.tryParse(capacity.text.trim());
-                if (name.text.trim().isEmpty ||
-                    plateNumber.text.trim().isEmpty ||
-                    seats == null ||
-                    seats <= 0) {
+                if (seats == null || seats <= 0) {
                   setDialogState(
-                    () =>
-                        validationError = 'Enter a name and positive capacity.',
+                    () => validationError =
+                        'Enter a positive passenger capacity.',
                   );
                   return;
                 }
@@ -221,17 +246,18 @@ class _VehiclesPageState extends State<VehiclesPage> {
       try {
         await FirebaseService.instance.updateVehicle(
           id,
-          name: name.text,
+          name: '$type ${plateNumber.text.trim().toUpperCase()}',
           capacity: int.parse(capacity.text.trim()),
           plateNumber: plateNumber.text,
           type: type,
         );
         _notice('Vehicle updated.');
       } on FirebaseException catch (error) {
-        _notice('Firebase ${error.code}: ${error.message}');
+        _notice('Request ${error.code}: ${error.message}');
+      } on ArgumentError catch (error) {
+        _notice(error.message?.toString() ?? 'Invalid vehicle plate number.');
       }
     }
-    name.dispose();
     capacity.dispose();
     plateNumber.dispose();
   }
@@ -243,7 +269,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
           : FirebaseService.instance.archiveVehicle(id));
       _notice(archived ? 'Vehicle restored.' : 'Vehicle archived.');
     } on FirebaseException catch (error) {
-      _notice('Firebase ${error.code}: ${error.message}');
+      _notice('Request ${error.code}: ${error.message}');
     }
   }
 
@@ -273,13 +299,12 @@ class _VehiclesPageState extends State<VehiclesPage> {
       await FirebaseService.instance.deleteVehicle(id);
       _notice('Vehicle deleted.');
     } on FirebaseException catch (error) {
-      _notice('Firebase ${error.code}: ${error.message}');
+      _notice('Request ${error.code}: ${error.message}');
     }
   }
 
-  Future<void> _linkGpsDevice(String vehicleId, String? currentUid) async {
-    final controller = TextEditingController(text: currentUid ?? '');
-    final uid = await showDialog<String>(
+  Future<void> _linkGpsDevice(String vehicleId) async {
+    await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Link GPS tracker'),
@@ -287,13 +312,17 @@ class _VehiclesPageState extends State<VehiclesPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SelectableText('Vehicle document ID: $vehicleId'),
+            const Text('Use this vehicle document ID in the hardware code:'),
             const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                labelText: 'Firebase Authentication device UID',
-                helperText: 'Use a separate account for each physical tracker.',
+            Center(
+              child: SelectableText(
+                vehicleId,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xFF176B45),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
               ),
             ),
           ],
@@ -301,23 +330,19 @@ class _VehiclesPageState extends State<VehiclesPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: const Text('Done'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Save'),
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: vehicleId));
+              if (context.mounted) Navigator.pop(context);
+              _notice('Vehicle document ID copied.');
+            },
+            child: const Text('Copy ID'),
           ),
         ],
       ),
     );
-    controller.dispose();
-    if (uid == null || uid.isEmpty) return;
-    try {
-      await FirebaseService.instance.linkVehicleGpsDevice(vehicleId, uid);
-      _notice('GPS tracker linked.');
-    } on FirebaseException catch (error) {
-      _notice('Firebase ${error.code}: ${error.message}');
-    }
   }
 
   void _notice(String message) {
@@ -383,13 +408,14 @@ class _VehiclesPageState extends State<VehiclesPage> {
         selectedId = docs.first.id;
       }
       final selected = docs.where((doc) => doc.id == selectedId).firstOrNull;
-      return SingleChildScrollView(
+      return LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(28),
         child: Column(
           children: [
             PageIntro(
               title: 'Fleet tracking',
-              subtitle: 'Live vehicle records from Firebase.',
+              subtitle: 'Live vehicle records from the server.',
               action: FilledButton.icon(
                 onPressed: _register,
                 icon: const Icon(Icons.add),
@@ -398,7 +424,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
             ),
             const SizedBox(height: 22),
             SizedBox(
-              height: 500,
+              height: (constraints.maxHeight - 295).clamp(500.0, 800.0),
               child: Row(
                 children: [
                   SizedBox(
@@ -493,7 +519,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                             ),
                                           ),
                                           subtitle: Text(
-                                            '${data['plateNumber'] ?? 'No plate'} • ${data['type'] ?? 'Jeep'} • ${data['passengerCapacity'] ?? 0} seats • ${vehicleDisplayStatus(data)}',
+                                            '${data['plateNumber'] ?? 'No plate'} • ${data['type'] ?? 'Jeep'} • ${data['passengerCapacity'] ?? 0} seats',
                                           ),
                                           trailing: PopupMenuButton<String>(
                                             tooltip: 'Vehicle actions',
@@ -509,11 +535,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                                   '${data['name'] ?? 'this vehicle'}',
                                                 );
                                               } else if (action == 'gps') {
-                                                _linkGpsDevice(
-                                                  doc.id,
-                                                  data['gpsDeviceUid']
-                                                      as String?,
-                                                );
+                                                _linkGpsDevice(doc.id);
                                               } else if (action == 'edit') {
                                                 _editVehicle(doc.id, data);
                                               } else if (action == 'qr') {
@@ -590,12 +612,13 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                   return Column(
                                     children: [
                                       Padding(
-                                        padding: const EdgeInsets.only(
-                                          bottom: 8,
-                                        ),
-                                        child: Text(
-                                          'Last GPS update: ${_gpsUpdateTime(selected.data()['lastGpsAt'])}  •  '
-                                          'Elapsed: ${_gpsUpdateAge(selected.data()['lastGpsAt'], now)}',
+                                        padding: const EdgeInsets.only(bottom: 8),
+                                        child: _VehicleRouteTimeline(
+                                          compact: true,
+                                          vehicleData: selected.data(),
+                                          vehicleIcon: '${selected.data()['type'] ?? ''}'
+                                                  .toLowerCase().contains('e-jeep')
+                                              ? eJeepIcon : jeepIcon,
                                         ),
                                       ),
                                       if (!online)
@@ -603,24 +626,63 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                           padding: const EdgeInsets.only(
                                             bottom: 8,
                                           ),
-                                          child: Text(
-                                            location == null
-                                                ? 'GPS offline. No vehicle coordinates have been received yet.'
-                                                : 'GPS offline. Showing the last known position, not a live location.',
-                                          ),
+                
                                         ),
                                       Expanded(
-                                        child: RealMap(
-                                          key: ValueKey(selected.id),
-                                          latitude: location?.latitude,
-                                          longitude: location?.longitude,
-                                          showMarker: location != null,
-                                          label:
-                                              '${selected.data()['name'] ?? 'Vehicle'}',
-                                          vehicleType:
-                                              '${selected.data()['type'] ?? 'Jeep'}',
-                                          plateNumber:
-                                              '${selected.data()['plateNumber'] ?? ''}',
+                                        child: Stack(
+                                          children: [
+                                            Positioned.fill(child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                                              stream: tripStream,
+                                              builder: (context, trips) {
+                                                final phone = _phoneMapLocation(selected.id, location,
+                                                    selected.data()['lastGpsAt'] as Timestamp?, trips.data);
+                                                final marker = phone ?? location;
+                                                return Stack(fit: StackFit.expand, children: [RealMap(
+                                                  key: ValueKey(selected.id),
+                                                  latitude: marker?.latitude,
+                                                  longitude: marker?.longitude,
+                                                  showMarker: marker != null,
+                                                  label: '${selected.data()['name'] ?? 'Vehicle'}',
+                                                  vehicleType: '${selected.data()['type'] ?? 'Jeep'}',
+                                                  plateNumber: '${selected.data()['plateNumber'] ?? ''}',
+                                                ), if (phone != null)
+                                                  Positioned(top: 12, left: 12,
+                                                    child: Chip(label: const Text('Phone GPS'))),
+                                                ]);
+                                              },
+                                            )),
+                                            Positioned(
+                                              top: 12,
+                                              right: 12,
+                                              child: _VehicleStatusBadge(
+                                                status: vehicleDisplayStatus(selected.data()),
+                                              ),
+                                            ),
+                                            Positioned(
+                                              left: 12,
+                                              right: 12,
+                                              bottom: 12,
+                                              child: Card(
+                                                margin: EdgeInsets.zero,
+                                                color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.96),
+                                                child: Padding(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    mainAxisSize: MainAxisSize.min,
+                                                    children: [
+                                                      Text('Direction: ${selected.data()['routeDirection'] == 'towardLastStop' ? 'Toward last stop' : selected.data()['routeDirection'] == 'towardFirstStop' ? 'Toward first stop' : 'Unknown'}'),
+                                                      Text(
+                                                        'Last GPS update: ${_gpsUpdateTime(selected.data()['lastGpsAt'])}  •  '
+                                                        'Elapsed: ${_gpsUpdateAge(selected.data()['lastGpsAt'], now)}',
+                                                        style: const TextStyle(fontSize: 12),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
@@ -643,15 +705,6 @@ class _VehiclesPageState extends State<VehiclesPage> {
                     tripStream: tripStream,
                   ),
                   const SizedBox(height: 16),
-                  _VehicleRouteTimeline(
-                    vehicleData: selected.data(),
-                    vehicleIcon:
-                        '${selected.data()['type'] ?? ''}'
-                            .toLowerCase()
-                            .contains('e-jeep')
-                        ? eJeepIcon
-                        : jeepIcon,
-                  ),
                 ],
               )
             else
@@ -665,6 +718,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
               ),
           ],
         ),
+        ),
       );
     },
   );
@@ -674,10 +728,12 @@ class _VehicleRouteTimeline extends StatelessWidget {
   const _VehicleRouteTimeline({
     required this.vehicleData,
     required this.vehicleIcon,
+    this.compact = false,
   });
 
   final Map<String, dynamic> vehicleData;
   final Future<Uint8List> vehicleIcon;
+  final bool compact;
 
   MapLocation? _vehicleLocation() {
     final raw = vehicleData['location'] ?? vehicleData['currentLocation'];
@@ -758,9 +814,13 @@ class _VehicleRouteTimeline extends StatelessWidget {
         }
       }
 
-      return Card(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+      return Padding(
+          padding: EdgeInsets.fromLTRB(
+            compact ? 12 : 20,
+            compact ? 8 : 16,
+            compact ? 12 : 20,
+            compact ? 8 : 20,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -768,11 +828,11 @@ class _VehicleRouteTimeline extends StatelessWidget {
                 children: [
                   const Icon(Icons.route_outlined),
                   const SizedBox(width: 8),
-                  const Expanded(
+                  Expanded(
                     child: Text(
                       'Route timeline',
                       style: TextStyle(
-                        fontSize: 17,
+                        fontSize: compact ? 13 : 17,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
@@ -783,48 +843,100 @@ class _VehicleRouteTimeline extends StatelessWidget {
                               ? 'Vehicle location unavailable'
                               : 'Between stops')
                         : 'At ${stops.firstWhere((stop) => stop.id == activeStopId).data()['name'] ?? 'route stop'}',
-                    style: TextStyle(color: theme.colorScheme.primary),
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                      fontSize: compact ? 11 : 14,
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(height: 18),
+              if (stops.length > 1 &&
+                  const {'towardLastStop', 'towardFirstStop'}
+                      .contains(vehicleData['routeDirection']))
+                Text(
+                  vehicleData['routeDirection'] == 'towardLastStop'
+                      ? '${stops.first.data()['name']} → ${stops.last.data()['name']}'
+                      : '${stops.last.data()['name']} → ${stops.first.data()['name']}',
+                  style: TextStyle(fontSize: compact ? 11 : 13,
+                      color: theme.colorScheme.primary),
+                ),
+              SizedBox(height: compact ? 6 : 18),
               if (snapshot.connectionState == ConnectionState.waiting &&
                   stops.isEmpty)
                 const LinearProgressIndicator()
               else if (stops.isEmpty)
                 const Text('No active route stops are registered.')
               else
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      for (var index = 0; index < stops.length; index++) ...[
-                        _TimelineStop(
-                          name:
-                              '${stops[index].data()['name'] ?? 'Stop ${index + 1}'}',
-                          order:
-                              (stops[index].data()['order'] as num?)?.toInt() ??
-                              index + 1,
-                          isCurrent: stops[index].id == activeStopId,
-                          vehicleIcon: vehicleIcon,
-                        ),
-                        if (index < stops.length - 1)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 28),
-                            child: Container(
-                              width: 52,
-                              height: 3,
-                              color: theme.colorScheme.outlineVariant,
-                            ),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final stopWidth = compact
+                        ? ((constraints.maxWidth - (stops.length - 1) * 8) /
+                                  stops.length)
+                              .clamp(36.0, 76.0)
+                        : 112.0;
+                    final timeline = Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (var index = 0; index < stops.length; index++) ...[
+                          _TimelineStop(
+                            compact: compact,
+                            width: stopWidth,
+                            name:
+                                '${stops[index].data()['name'] ?? 'Stop ${index + 1}'}',
+                            order: index + 1,
+                            isCurrent: stops[index].id == activeStopId,
+                            vehicleIcon: vehicleIcon,
                           ),
+                          if (index < stops.length - 1)
+                            Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  top: compact ? 14 : 28,
+                                ),
+                                child: Container(
+                                  height: 2,
+                                  color: theme.colorScheme.outlineVariant,
+                                ),
+                              ),
+                            ),
+                        ],
                       ],
-                    ],
-                  ),
+                    );
+                    final requiredWidth = stops.length * stopWidth;
+                    if (!compact || requiredWidth <= constraints.maxWidth) {
+                      return timeline;
+                    }
+                    return SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SizedBox(
+                        width: requiredWidth + (stops.length - 1) * 8,
+                        child: Row(
+                          children: [
+                            for (
+                              var index = 0;
+                              index < stops.length;
+                              index++
+                            ) ...[
+                              _TimelineStop(
+                                compact: compact,
+                                width: stopWidth,
+                                name:
+                                    '${stops[index].data()['name'] ?? 'Stop ${index + 1}'}',
+                                order: index + 1,
+                                isCurrent: stops[index].id == activeStopId,
+                                vehicleIcon: vehicleIcon,
+                              ),
+                              if (index < stops.length - 1)
+                                const SizedBox(width: 8),
+                            ],
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
             ],
           ),
-        ),
       );
     },
   );
@@ -832,12 +944,16 @@ class _VehicleRouteTimeline extends StatelessWidget {
 
 class _TimelineStop extends StatelessWidget {
   const _TimelineStop({
+    required this.compact,
+    required this.width,
     required this.name,
     required this.order,
     required this.isCurrent,
     required this.vehicleIcon,
   });
 
+  final bool compact;
+  final double width;
   final String name;
   final int order;
   final bool isCurrent;
@@ -847,12 +963,12 @@ class _TimelineStop extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return SizedBox(
-      width: 112,
+      width: width,
       child: Column(
         children: [
           SizedBox(
-            width: 56,
-            height: 56,
+            width: compact ? 28 : 56,
+            height: compact ? 28 : 56,
             child: isCurrent
                 ? FutureBuilder<Uint8List>(
                     future: vehicleIcon,
@@ -861,7 +977,7 @@ class _TimelineStop extends StatelessWidget {
                         : Icon(
                             Icons.directions_bus,
                             color: theme.colorScheme.primary,
-                            size: 32,
+                            size: compact ? 18 : 32,
                           ),
                   )
                 : CircleAvatar(
@@ -872,14 +988,14 @@ class _TimelineStop extends StatelessWidget {
                     ),
                   ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: compact ? 3 : 8),
           Text(
             name,
             textAlign: TextAlign.center,
-            maxLines: 2,
+            maxLines: compact ? 1 : 2,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 12,
+              fontSize: compact ? 9 : 12,
               fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w500,
               color: isCurrent ? theme.colorScheme.primary : null,
             ),
@@ -888,7 +1004,7 @@ class _TimelineStop extends StatelessWidget {
             Text(
               'VEHICLE HERE',
               style: TextStyle(
-                fontSize: 9,
+                fontSize: compact ? 7 : 9,
                 color: theme.colorScheme.primary,
                 fontWeight: FontWeight.w800,
               ),
@@ -945,11 +1061,7 @@ class _VehicleDetails extends StatelessWidget {
       return Row(
         children: [
           Expanded(
-            child: _Info(
-              'Assigned driver',
-              '${data['driverName'] ?? 'Not assigned'}',
-              data['driverName'] == null ? 'No driver assigned' : 'Driver',
-            ),
+            child: _AssignedDriver(data: data),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -979,6 +1091,114 @@ class _VehicleDetails extends StatelessWidget {
       );
     },
   );
+}
+
+class _VehicleStatusBadge extends StatelessWidget {
+  const _VehicleStatusBadge({required this.status});
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = status == 'OFFLINE'
+        ? Colors.grey.shade800
+        : status == 'ACTIVE'
+            ? const Color(0xFF08783E)
+            : Colors.orange.shade800;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        child: Text(status, style: const TextStyle(
+          color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800,
+        )),
+      ),
+    );
+  }
+}
+
+class _AssignedDriver extends StatelessWidget {
+  const _AssignedDriver({required this.data});
+  final Map<String, dynamic> data;
+
+  @override
+  Widget build(BuildContext context) {
+    final driverId = '${data['driverId'] ?? ''}'.trim();
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: driverId.isEmpty ? null : FirebaseService.instance.db
+          .collection('drivers').doc(driverId).snapshots(),
+      builder: (context, snapshot) {
+        final driver = snapshot.data?.data();
+        final name = driver == null
+            ? '${data['driverName'] ?? 'Not assigned'}'
+            : '${driver['firstName'] ?? ''} ${driver['lastName'] ?? ''}'.trim();
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Assigned driver', style: TextStyle(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 10),
+                Row(children: [
+                  ClipOval(child: SizedBox.square(
+                    dimension: 48,
+                    child: driver == null ? const Icon(Icons.person_outline)
+                        : _DriverAvatar(data: driver),
+                  )),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(name, style: const TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w900,
+                  ))),
+                ]),
+                Text(driverId.isEmpty ? 'No driver assigned' : 'Driver',
+                    style: const TextStyle(color: Colors.black45)),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DriverAvatar extends StatelessWidget {
+  const _DriverAvatar({required this.data});
+  final Map<String, dynamic> data;
+
+  @override
+  Widget build(BuildContext context) {
+    final encoded = data['photoBase64'];
+    if (encoded is String && encoded.isNotEmpty) {
+      try {
+        return Image.memory(base64Decode(encoded), fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => const Icon(Icons.person_outline));
+      } on FormatException {
+        // Fall through to older photo fields.
+      }
+    }
+    final url = '${data['photoUrl'] ?? ''}'.trim();
+    if (url.startsWith('http')) {
+      return Image.network(url, fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const Icon(Icons.person_outline));
+    }
+    final path = url.isNotEmpty ? url : '${data['photoPath'] ?? ''}'.trim();
+    if (path.isNotEmpty) {
+      final ref = path.startsWith('gs://')
+          ? FirebaseStorage.instance.refFromURL(path)
+          : FirebaseStorage.instance.ref(path);
+      return FutureBuilder<Uint8List?>(
+        future: ref.getData(1024 * 1024),
+        builder: (context, image) => image.hasData && image.data != null
+            ? Image.memory(image.data!, fit: BoxFit.cover)
+            : const Icon(Icons.person_outline),
+      );
+    }
+    return const Icon(Icons.person_outline);
+  }
 }
 
 class _Info extends StatelessWidget {
@@ -1025,7 +1245,7 @@ class _FirebaseError extends StatelessWidget {
     child: Padding(
       padding: const EdgeInsets.all(32),
       child: Text(
-        'Could not load vehicles from Firebase.\n$error',
+        'Could not load vehicles from the server.\n$error',
         textAlign: TextAlign.center,
       ),
     ),

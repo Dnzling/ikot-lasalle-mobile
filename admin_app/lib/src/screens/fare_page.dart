@@ -31,7 +31,7 @@ class FarePage extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Fares apply to every route. A later destination in route order uses Default Fare; an earlier destination uses Round Trip Fare.',
+                  'Default fare applies when the vehicle reaches the passenger\'s destination in its current direction. Round-trip fare applies when the vehicle must pass an endpoint and reverse direction before reaching the destination.',
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -94,14 +94,10 @@ class FarePage extends StatelessWidget {
                         error = null;
                       });
                       try {
-                        await FirebaseService.instance.db
-                            .collection('settings')
-                            .doc('fares')
-                            .set({
-                              'defaultFare': normal,
-                              'roundTripFare': round,
-                              'updatedAt': FieldValue.serverTimestamp(),
-                            }, SetOptions(merge: true));
+                        await FirebaseService.instance.updateGlobalFares(
+                          defaultFare: normal,
+                          roundTripFare: round,
+                        );
                         if (dialogContext.mounted) Navigator.pop(dialogContext);
                       } catch (exception) {
                         if (dialogContext.mounted) {
@@ -144,9 +140,10 @@ class FarePage extends StatelessWidget {
             PageIntro(
               title: 'Fare settings',
               subtitle:
-                  'Universal fares based on the pickup and destination order.',
+                  'Universal fares based on the vehicle\'s current route direction.',
               action: FilledButton.icon(
-                onPressed: () => _edit(context, defaultFare ?? 0, roundFare ?? 0),
+                onPressed: () =>
+                    _edit(context, defaultFare ?? 0, roundFare ?? 0),
                 icon: const Icon(Icons.edit),
                 label: const Text('Edit fares'),
               ),
@@ -159,12 +156,12 @@ class FarePage extends StatelessWidget {
                 _FareCard(
                   'DEFAULT FARE',
                   defaultFare,
-                  'Forward in route order, for example Route Gate 3 → Route Gate 1.',
+                  'The fare for a trip that reaches the passenger\'s destination in the vehicle\'s current direction.',
                 ),
                 _FareCard(
                   'ROUND TRIP FARE',
                   roundFare,
-                  'Wraps around the cycle, for example Route SHS Bldg. → Route Polca Parking.',
+                  'The fare for a trip that passes a route endpoint before reaching the passenger\'s destination after the vehicle reverses direction.',
                 ),
               ],
             ),

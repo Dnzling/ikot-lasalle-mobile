@@ -25,7 +25,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool emailBusy = false;
   String pendingEmail = '';
   List<BusLocation> buses = const [];
-  Timer? busRefreshTimer;
+  StreamSubscription<List<BusLocation>>? busSubscription;
+  Timer? freshnessTimer;
   late final Stream<ActiveTrip?> activeTripStream;
 
   @override
@@ -36,16 +37,23 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     _checkApi();
     _refreshEmailVerification(silent: true);
-    _loadBuses();
-    busRefreshTimer = Timer.periodic(
-      const Duration(seconds: 15),
-      (_) => _loadBuses(),
+    busSubscription = const PassengerFirebaseService().watchBusLocations().listen(
+      (locations) {
+        if (mounted) setState(() => buses = locations);
+      },
+      onError: (Object error) {
+        if (mounted) setState(() => buses = buses.where((bus) => bus.hasFreshGps).toList());
+      },
     );
+    freshnessTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
-    busRefreshTimer?.cancel();
+    busSubscription?.cancel();
+    freshnessTimer?.cancel();
     emailController.dispose();
     super.dispose();
   }
@@ -120,18 +128,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } finally {
       if (!silent && mounted) setState(() => emailBusy = false);
-    }
-  }
-
-  Future<void> _loadBuses() async {
-    try {
-      final result = await const PassengerFirebaseService().getBusLocations();
-      if (mounted) setState(() => buses = result);
-    } catch (_) {
-      // Never keep displaying stale coordinates as live when a refresh fails.
-      if (mounted) {
-        setState(() => buses = buses.where((bus) => bus.hasFreshGps).toList());
-      }
     }
   }
 

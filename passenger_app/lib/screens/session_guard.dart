@@ -35,14 +35,15 @@ class _SessionGuardState extends State<SessionGuard> {
           final data = snapshot.data();
           final reason = data?['endReason'];
           if (data?['active'] == false &&
-              (reason == 'newDevice' || reason == 'passwordReset') &&
+              (reason == 'newDevice' || reason == 'passwordReset' ||
+                  reason == 'archived') &&
               !_handlingLogout) {
-            _handleForcedLogout(reason == 'passwordReset');
+            _handleForcedLogout(reason == 'passwordReset', reason == 'archived');
           }
         });
   }
 
-  Future<void> _handleForcedLogout(bool passwordReset) async {
+  Future<void> _handleForcedLogout(bool passwordReset, bool archived) async {
     _handlingLogout = true;
     await const PassengerFirebaseService().clearLocalSession(
       widget.session.uid,
@@ -54,12 +55,16 @@ class _SessionGuardState extends State<SessionGuard> {
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
         title: Text(
-          passwordReset
+          archived
+              ? 'Account Archived'
+              : passwordReset
               ? 'Password Reset, Logging Out'
               : 'New Device Detected, Logging Out',
         ),
         content: Text(
-          passwordReset
+          archived
+              ? 'Your account has been archived. Contact the admin office to restore access.'
+              : passwordReset
               ? 'Your password was reset. Sign in using the temporary password from the admin office.'
               : 'Another login was detected. Both sessions were signed out. Please log in again.',
         ),

@@ -7,6 +7,7 @@ class Passenger {
     required this.phone,
     required this.balance,
     required this.mustChangePassword,
+    this.userType = 'Passenger',
     this.email = '',
     this.emailVerified = false,
   });
@@ -18,6 +19,7 @@ class Passenger {
   final String phone;
   final double balance;
   final bool mustChangePassword;
+  final String userType;
   final String email;
   final bool emailVerified;
 
@@ -34,6 +36,7 @@ class Passenger {
         double.tryParse('${json['balance']}') ??
         0,
     mustChangePassword: json['mustChangePassword'] == true,
+    userType: '${json['userType'] ?? 'Passenger'}',
     email: '${json['email'] ?? ''}'.trim(),
     emailVerified: json['emailVerified'] == true,
   );
@@ -50,6 +53,7 @@ class Passenger {
     phone: phone,
     balance: balance,
     mustChangePassword: mustChangePassword ?? this.mustChangePassword,
+    userType: userType,
     email: email ?? this.email,
     emailVerified: emailVerified ?? this.emailVerified,
   );

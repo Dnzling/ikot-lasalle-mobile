@@ -1,7 +1,7 @@
 # Ikot La Salle Passenger App
 
 Passenger accounts use Firebase Authentication, with profile and app data stored
-in the shared Firestore project `ikot-lasalle-ccfab`. Top-up receipt previews
+in the shared Firestore project `ikot-lasalle-2bed1`. Top-up receipt previews
 are stored as bounded Firestore bytes with their requests.
 
 ## Firebase data

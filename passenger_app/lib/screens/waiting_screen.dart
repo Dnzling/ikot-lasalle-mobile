@@ -46,12 +46,15 @@ class WaitingScreen extends StatefulWidget {
 }
 
 class _WaitingScreenState extends State<WaitingScreen> {
+  static const _rideAlertChannel = MethodChannel('ikot_lasalle/ride_alert');
   bool boarded = false;
   bool canceled = false;
   bool canceling = false;
   Timer? expiryTimer;
   Timer? etaTimer;
   Timer? proximityTimer;
+  Timer? phoneGpsTimer;
+  bool phoneGpsRunning = false;
   late final Stream<List<BusLocation>> vehicleLocations;
   StreamSubscription<List<BusLocation>>? vehicleSubscription;
   BusLocation? assignedVehicle;
@@ -62,17 +65,20 @@ class _WaitingScreenState extends State<WaitingScreen> {
   int insideFixes = 0;
   bool completingArrival = false;
   bool arrived = false;
+  double? boardedFare;
   bool stopsLoaded = false;
+  String? firstRouteName;
+  String? lastRouteName;
+  List<String> routeNames = const [];
   bool stopReached = false;
-  bool proximityCheckRunning = false;
   bool overstayAlerted = false;
-  int nearVehicleFixes = 0;
 
   @override
   void initState() {
     super.initState();
     boarded =
         widget.initialStatus == 'onboard' || widget.initialStatus == 'boarded';
+    if (boarded) boardedFare = widget.fare;
     assignedVehicleId = widget.vehicleId;
     boardedAt = widget.boardedAt ?? (boarded ? widget.createdAt : null);
     vehicleLocations = const PassengerFirebaseService()
@@ -94,6 +100,9 @@ class _WaitingScreenState extends State<WaitingScreen> {
       }
       _checkMissedStop();
     });
+    phoneGpsTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _publishPhoneGps();
+    });
     if (!boarded) {
       final elapsed = widget.createdAt == null
           ? Duration.zero
@@ -108,11 +117,55 @@ class _WaitingScreenState extends State<WaitingScreen> {
 
   @override
   void dispose() {
+    unawaited(_stopAlertSound());
     expiryTimer?.cancel();
     etaTimer?.cancel();
     proximityTimer?.cancel();
+    phoneGpsTimer?.cancel();
     vehicleSubscription?.cancel();
     super.dispose();
+  }
+
+  Future<void> _publishPhoneGps() async {
+    final vehicleId = assignedVehicleId;
+    if (!mounted || !boarded || arrived || completingArrival ||
+        phoneGpsRunning || vehicleId == null) return;
+    phoneGpsRunning = true;
+    try {
+      final service = const PassengerFirebaseService();
+      if (!await service.isSelectedPhoneReporter(uid: widget.session.uid,
+          bookingId: widget.bookingId, vehicleId: vehicleId)) return;
+      final position = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+            accuracy: geo.LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 5));
+      if (!mounted || !boarded || arrived) return;
+      await service.publishOnboardPhoneLocation(
+        uid: widget.session.uid, bookingId: widget.bookingId,
+        vehicleId: vehicleId, position: position);
+    } catch (error) {
+      debugPrint('Phone GPS update unavailable: $error');
+    } finally {
+      phoneGpsRunning = false;
+    }
+  }
+
+  Future<void> _playAlertSound(String kind) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _rideAlertChannel.invokeMethod<void>('play', {'kind': kind});
+    } catch (error) {
+      debugPrint('Could not play ride alert: $error');
+    }
+  }
+
+  Future<void> _stopAlertSound() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _rideAlertChannel.invokeMethod<void>('stop');
+    } catch (error) {
+      debugPrint('Could not stop ride alert: $error');
+    }
   }
 
   Future<void> _loadStops() async {
@@ -128,10 +181,19 @@ class _WaitingScreenState extends State<WaitingScreen> {
               routeId: widget.pickupRouteId,
               name: widget.pickup!,
             );
+      List<Map<String, dynamic>> routes = [];
+      try {
+        routes = await service.getRoutes();
+      } catch (_) {
+        // Stop coordinates can still be used when the route list is unavailable.
+      }
       if (!mounted) return;
       setState(() {
         destinationStop = destination;
         pickupStop = pickup;
+        firstRouteName = routes.firstOrNull?['name'] as String?;
+        lastRouteName = routes.lastOrNull?['name'] as String?;
+        routeNames = routes.map((route) => '${route['name'] ?? ''}').toList();
         stopsLoaded = true;
       });
       _checkArrivalGeofence();
@@ -191,12 +253,13 @@ class _WaitingScreenState extends State<WaitingScreen> {
 
   void _checkArrivalGeofence() {
     if (!boarded || arrived || completingArrival) return;
+    if (assignedVehicle?.locationSource != 'hardware') return;
     final stop = destinationStop;
     final distance = _distanceToDestination;
     if (stop == null || distance == null) return;
     if (distance > stop.radiusMeters) {
       insideFixes = 0;
-    } else if (!stopReached && ++insideFixes >= 2) {
+    } else if (!stopReached && ++insideFixes >= 1) {
       _notifyDestinationReached();
     }
   }
@@ -210,7 +273,14 @@ class _WaitingScreenState extends State<WaitingScreen> {
       // Some web browsers and devices do not provide vibration.
     }
     if (!mounted) return;
-    final confirmed = await showDialog<bool>(
+    await _playAlertSound('notification');
+    if (!mounted) {
+      await _stopAlertSound();
+      return;
+    }
+    bool? confirmed;
+    try {
+      confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Your stop is here'),
@@ -228,7 +298,10 @@ class _WaitingScreenState extends State<WaitingScreen> {
           ),
         ],
       ),
-    );
+      );
+    } finally {
+      await _stopAlertSound();
+    }
     if (confirmed == true && mounted) {
       await showArrival();
     }
@@ -238,15 +311,16 @@ class _WaitingScreenState extends State<WaitingScreen> {
     if (!mounted ||
         !boarded ||
         !stopReached ||
+        completingArrival ||
         arrived ||
-        overstayAlerted ||
-        proximityCheckRunning) {
+        overstayAlerted) {
       return;
     }
     final stop = destinationStop;
     final vehicle = assignedVehicle;
     if (stop == null ||
         vehicle == null ||
+        vehicle.locationSource != 'hardware' ||
         geo.Geolocator.distanceBetween(
               vehicle.latitude,
               vehicle.longitude,
@@ -254,29 +328,10 @@ class _WaitingScreenState extends State<WaitingScreen> {
               stop.longitude,
             ) <=
             stop.radiusMeters + 15) {
-      nearVehicleFixes = 0;
       return;
     }
-    proximityCheckRunning = true;
+    overstayAlerted = true;
     try {
-      final phone = await geo.Geolocator.getCurrentPosition(
-        locationSettings: const geo.LocationSettings(
-          accuracy: geo.LocationAccuracy.high,
-        ),
-      ).timeout(const Duration(seconds: 4));
-      if (!mounted || arrived || phone.accuracy > 50) {
-        nearVehicleFixes = 0;
-        return;
-      }
-      final separation = geo.Geolocator.distanceBetween(
-        phone.latitude,
-        phone.longitude,
-        vehicle.latitude,
-        vehicle.longitude,
-      );
-      nearVehicleFixes = separation <= 75 ? nearVehicleFixes + 1 : 0;
-      if (nearVehicleFixes < 2) return;
-      overstayAlerted = true;
       if (!mounted) return;
       try {
         await HapticFeedback.vibrate();
@@ -284,12 +339,23 @@ class _WaitingScreenState extends State<WaitingScreen> {
         // Vibration is unavailable on some web browsers and devices.
       }
       if (!mounted) return;
-      await showDialog<void>(
+      await _playAlertSound('alarm');
+      if (!mounted) {
+        await _stopAlertSound();
+        return;
+      }
+      try {
+        final destinationIndex = routeNames.indexOf(widget.destination);
+        final nextIndex = assignedVehicle?.routeDirection == 'towardFirstStop'
+            ? destinationIndex - 1 : destinationIndex + 1;
+        final nextRoute = nextIndex >= 0 && nextIndex < routeNames.length
+            ? routeNames[nextIndex] : 'the next stop';
+        await showDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('Check your ride status'),
-          content: const Text(
-            'The jeep has left your destination stop and your phone still appears nearby. If you got off, tap I have arrived. If you are still riding, please get off at a safe stop.',
+          title: const Text('You are overstaying'),
+          content: Text(
+            'You are overstaying. 10 credits will be deducted. Please drop off at $nextRoute. If you already got off, tap I have arrived.',
           ),
           actions: [
             TextButton(
@@ -305,11 +371,12 @@ class _WaitingScreenState extends State<WaitingScreen> {
             ),
           ],
         ),
-      );
+        );
+      } finally {
+        await _stopAlertSound();
+      }
     } catch (_) {
-      nearVehicleFixes = 0;
-    } finally {
-      proximityCheckRunning = false;
+      // The server still evaluates the penalty from hardware GPS.
     }
   }
 
@@ -383,17 +450,41 @@ class _WaitingScreenState extends State<WaitingScreen> {
           (payload['vehicleId'] as String).isEmpty) {
         throw const FormatException('Not a valid boarding QR code.');
       }
-      final passenger = await const PassengerFirebaseService().boardRide(
+      final service = const PassengerFirebaseService();
+      final preview = await service.previewBoardingFare(
+        widget.bookingId, payload['vehicleId'] as String);
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Confirm boarding fare'),
+          content: Text('${preview.fareType} fare for ${widget.passengerCount} '
+              'passenger${widget.passengerCount == 1 ? '' : 's'}: '
+              'PHP ${preview.fare.toStringAsFixed(2)}. '
+              'Vehicle direction: ${preview.directionLabel}.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Confirm and board')),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      final passenger = await service.boardRide(
         widget.session.uid,
         widget.bookingId,
         payload['vehicleId'] as String,
         payload['type'] as String,
+        confirmedFare: preview.fare,
+        confirmedDirection: preview.direction,
       );
       widget.session.updatePassenger(passenger);
       expiryTimer?.cancel();
       if (mounted) {
         setState(() {
           boarded = true;
+          boardedFare = preview.fare;
           assignedVehicleId = payload['vehicleId'] as String;
           boardedAt = DateTime.now();
           assignedVehicle = null;
@@ -410,7 +501,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   }
 
   Future<void> showArrival() async {
-    if (completingArrival || arrived || !boarded) return;
+    if (completingArrival || arrived || !boarded || !stopReached) return;
     setState(() => completingArrival = true);
     try {
       await const PassengerFirebaseService().completeRide(
@@ -479,7 +570,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                boarded ? 'PAID FARE' : 'ESTIMATED FARE',
+              boarded ? 'PAID FARE' : 'FARE',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 12,
@@ -488,17 +579,18 @@ class _WaitingScreenState extends State<WaitingScreen> {
               ),
               SizedBox(height: 8),
               Text(
-                'PHP ${widget.fare.toStringAsFixed(2)}',
+                boarded ? 'PHP ${(boardedFare ?? widget.fare).toStringAsFixed(2)}'
+                    : 'Calculated when you board',
                 style: TextStyle(
                   color: Colors.white,
-                  fontSize: 30,
+                  fontSize: boarded ? 30 : 19,
                   fontWeight: FontWeight.w800,
                 ),
               ),
               SizedBox(height: 8),
               if (!boarded)
                 Text(
-                  'Payment is temporary until QR boarding.',
+                  'Review the fare before confirming boarding.',
                   style: TextStyle(color: Colors.white70),
                 ),
             ],
@@ -547,6 +639,20 @@ class _WaitingScreenState extends State<WaitingScreen> {
         ),
         if (boarded) ...[
           const SizedBox(height: 8),
+          const Text(
+            'Overstaying is punishable with 10 credits.',
+            style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            assignedVehicle?.routeDirection == 'towardLastStop'
+                ? 'Vehicle direction: ${firstRouteName ?? 'First stop'} → ${lastRouteName ?? 'Last stop'}'
+                : assignedVehicle?.routeDirection == 'towardFirstStop'
+                    ? 'Vehicle direction: ${lastRouteName ?? 'Last stop'} → ${firstRouteName ?? 'First stop'}'
+                    : 'Vehicle direction: waiting for GPS',
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
           Text(
             destinationStop == null
                 ? stopsLoaded
@@ -559,13 +665,11 @@ class _WaitingScreenState extends State<WaitingScreen> {
           ),
         ],
         const SizedBox(height: 20),
-        if (!boarded ||
-            stopReached ||
-            (_etaMinutes != null && _etaMinutes! <= 2))
+        if (!boarded || !arrived)
           SizedBox(
             height: 54,
             child: FilledButton.icon(
-              onPressed: completingArrival
+              onPressed: completingArrival || (boarded && !stopReached)
                   ? null
                   : boarded
                   ? () => showArrival()

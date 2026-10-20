@@ -3,18 +3,18 @@
     "platforms": {
       "android": {
         "default": {
-          "projectId": "ikot-lasalle-ccfab",
-          "appId": "1:1002016926977:android:a9dc37107d13602467ff00",
+          "projectId": "ikot-lasalle-2bed1",
+          "appId": "1:896555643484:android:c6a16a2b8f43b935946c99",
           "fileOutput": "android/app/google-services.json"
         }
       },
       "dart": {
         "lib/firebase_options.dart": {
-          "projectId": "ikot-lasalle-ccfab",
+          "projectId": "ikot-lasalle-2bed1",
           "configurations": {
-            "android": "1:1002016926977:android:a9dc37107d13602467ff00",
-            "ios": "1:1002016926977:ios:79d91eac0f3b7abf67ff00",
-            "web": "1:1002016926977:web:088673e7d0ebc19867ff00"
+            "android": "1:896555643484:android:c6a16a2b8f43b935946c99",
+            "ios": "1:896555643484:ios:456e7dd735340d92946c99",
+            "web": "1:896555643484:web:8003e69410e080ec946c99"
           }
         }
       }
@@ -22,5 +22,8 @@
   },
   "storage": {
     "rules": "storage.rules"
+  },
+  "firestore": {
+    "rules": "firestore.rules"
   }
 }

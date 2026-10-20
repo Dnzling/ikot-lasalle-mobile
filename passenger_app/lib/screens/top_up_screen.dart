@@ -31,6 +31,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
   double? ocrAmount;
   String gcashAccountName = '';
   String gcashNumber = '';
+  double minimumTopUpCredits = 1;
   String? message;
   bool scanning = false;
   bool submitting = false;
@@ -39,6 +40,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
   void initState() {
     super.initState();
     _loadPaymentDetails();
+    _loadMinimumTopUp();
   }
 
   @override
@@ -60,6 +62,15 @@ class _TopUpScreenState extends State<TopUpScreen> {
       }
     } catch (_) {
       // The payment number is helpful but does not prevent showing the form.
+    }
+  }
+
+  Future<void> _loadMinimumTopUp() async {
+    try {
+      final minimum = await const PassengerFirebaseService().getMinimumTopUpCredits();
+      if (mounted) setState(() => minimumTopUpCredits = minimum);
+    } catch (_) {
+      // Submission reads the setting again and fails if it is unavailable.
     }
   }
 
@@ -254,6 +265,11 @@ class _TopUpScreenState extends State<TopUpScreen> {
       );
       return;
     }
+    if (amount < minimumTopUpCredits) {
+      setState(() => message =
+          'Minimum top-up is PHP ${minimumTopUpCredits.toStringAsFixed(2)}.');
+      return;
+    }
     if (bytes == null || file == null) {
       setState(() => message = 'Attach your GCash receipt first.');
       return;
@@ -315,6 +331,11 @@ class _TopUpScreenState extends State<TopUpScreen> {
             style: TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 18),
+          Text(
+            'Minimum top-up: PHP ${minimumTopUpCredits.toStringAsFixed(2)}',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 12),
           Card(
             color: const Color(0xFFE5F4EA),
             child: Padding(

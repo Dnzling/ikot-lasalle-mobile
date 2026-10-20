@@ -44,6 +44,13 @@ class AdminShell extends StatefulWidget {
 
 class _AdminShellState extends State<AdminShell> {
   int selected = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    FirebaseService.instance.loadVehicleStatusTimeout();
+  }
+
   @override
   Widget build(BuildContext context) {
     final activeIndex = selected.clamp(0, _tabs.length - 1);
@@ -101,6 +108,24 @@ class _AdminShellState extends State<AdminShell> {
                   label: 'Log out',
                   active: false,
                   onTap: () async {
+                    final confirmed = await showDialog<bool>(
+                      context: context,
+                      builder: (dialogContext) => AlertDialog(
+                        title: const Text('Log out?'),
+                        content: const Text('Are you sure you want to log out of the admin app?'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(dialogContext, false),
+                            child: const Text('Cancel'),
+                          ),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(dialogContext, true),
+                            child: const Text('Log out'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirmed != true || !context.mounted) return;
                     await FirebaseService.instance.signOut();
                     if (context.mounted) {
                       Navigator.of(context).pushReplacement(

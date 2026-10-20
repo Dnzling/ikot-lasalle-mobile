@@ -4,6 +4,9 @@ import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart' as core;
+import 'package:geolocator/geolocator.dart' as geo;
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_session.dart';
@@ -18,7 +21,7 @@ bool vehicleGpsIsFresh(Map<String, dynamic> vehicle) {
   if (lastGpsAt is! Timestamp) return false;
   final age = DateTime.now().difference(lastGpsAt.toDate());
   return age >= const Duration(seconds: -5) &&
-      age <= const Duration(seconds: 30);
+      age <= const Duration(seconds: 120);
 }
 
 class PassengerFirebaseService {
@@ -27,6 +30,74 @@ class PassengerFirebaseService {
   static final _auth = FirebaseAuth.instance;
   static final _db = FirebaseFirestore.instance;
   static final _preferences = SharedPreferencesAsync();
+  static const _trustedApiBase = String.fromEnvironment('TRUSTED_API_BASE_URL');
+
+  Future<void> _syncLoginAlias(String uid, String idNumber, String email) async {
+    if (idNumber.isEmpty || email.isEmpty ||
+        _auth.currentUser?.uid != uid ||
+        _auth.currentUser?.emailVerified != true) return;
+    await _auth.currentUser!.getIdToken(true);
+    await _db.collection('loginAliases').doc(idNumber).set({
+      'uid': uid,
+      'email': email.toLowerCase(),
+    });
+  }
+
+  Future<Map<String, dynamic>> _trustedRequest(
+    String path,
+    Map<String, dynamic> payload,
+  ) async {
+    final base = Uri.tryParse(_trustedApiBase);
+    if (base == null || base.scheme != 'https' || base.host.isEmpty) {
+      throw StateError('Trusted API is not configured with an HTTPS address.');
+    }
+    final user = _auth.currentUser;
+    if (user == null) throw StateError('Sign in again to continue.');
+    final token = await user.getIdToken();
+    final response = await http.post(
+      base.resolve(path),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(payload),
+    ).timeout(const Duration(seconds: 20));
+    final result = jsonDecode(response.body);
+    if (response.statusCode != 200 || result is! Map<String, dynamic>) {
+      throw StateError(result is Map ? '${result['error'] ?? 'Request failed.'}' : 'Request failed.');
+    }
+    return result;
+  }
+
+  Future<bool> isSelectedPhoneReporter({
+    required String uid,
+    required String bookingId,
+    required String vehicleId,
+  }) async {
+    if (_auth.currentUser?.uid != uid) return false;
+    final trip = (await _db.collection('trips').doc(bookingId).get()).data();
+    return trip?['userId'] == uid &&
+        trip?['vehicleId'] == vehicleId &&
+        trip?['status'] == 'onboard';
+  }
+
+  Future<void> publishOnboardPhoneLocation({
+    required String uid,
+    required String bookingId,
+    required String vehicleId,
+    required geo.Position position,
+  }) async {
+    if (position.accuracy > 30 || position.accuracy < 0 ||
+        DateTime.now().difference(position.timestamp) > const Duration(seconds: 10) ||
+        !(await isSelectedPhoneReporter(
+          uid: uid, bookingId: bookingId, vehicleId: vehicleId,
+        ))) return;
+    await _db.collection('trips').doc(bookingId).update({
+      'phoneLocation': GeoPoint(position.latitude, position.longitude),
+      'phoneGpsAt': FieldValue.serverTimestamp(),
+      'phoneGpsAccuracyMeters': position.accuracy,
+    });
+  }
 
   static String _sessionKey(String uid) => 'passenger.session.$uid';
 
@@ -50,6 +121,7 @@ class PassengerFirebaseService {
     final data = profile.data();
     final currentSession = data?['session'];
     if (data == null ||
+        data['active'] == false ||
         currentSession is! Map ||
         currentSession['active'] != true ||
         currentSession['id'] != localSessionId) {
@@ -152,15 +224,11 @@ class PassengerFirebaseService {
           aliasError.code != 'invalid-credential') {
         rethrow;
       }
-      final matches = await _db
-          .collection('users')
-          .where('idNumber', isEqualTo: cleanId)
-          .limit(1)
-          .get();
-      if (matches.docs.isEmpty) {
+      final alias = await _db.collection('loginAliases').doc(cleanId).get();
+      if (!alias.exists) {
         Error.throwWithStackTrace(aliasError, stackTrace);
       }
-      final profileData = matches.docs.first.data();
+      final profileData = alias.data()!;
       final emailCandidates = <String>[
         '${profileData['pendingEmail'] ?? ''}'.trim(),
         '${profileData['email'] ?? ''}'.trim(),
@@ -205,6 +273,12 @@ class PassengerFirebaseService {
         message: 'No passenger profile is linked to this ID number.',
       );
     }
+    if (data['active'] == false) {
+      await _auth.signOut();
+      throw StateError(
+        'This account is inactive. Please contact the administrator.',
+      );
+    }
     // Email verification changes the Firebase Auth email first. A passenger
     // may sign out before pressing the Home screen's refresh button, leaving
     // the Firestore lookup stale. Once Auth confirms the verified address,
@@ -226,6 +300,11 @@ class PassengerFirebaseService {
         'email': user.email!.trim().toLowerCase(),
         'emailVerified': true,
       };
+      try {
+        await _syncLoginAlias(user.uid, cleanId, user.email!.trim());
+      } catch (_) {
+        // Sign-in remains usable even if the alias needs an administrator repair.
+      }
     }
     // A hot restart can show the login screen while this same installation
     // still holds its Firebase Auth session. Resume that session instead of
@@ -248,6 +327,11 @@ class PassengerFirebaseService {
       transaction,
     ) async {
       final current = await transaction.get(userRef);
+      if (current.data()?['active'] == false) {
+        throw StateError(
+          'This account is inactive. Please contact the administrator.',
+        );
+      }
       final activeSession = current.data()?['session'];
       if (activeSession is Map && activeSession['active'] == true) {
         final oldSessionId = '${activeSession['id'] ?? ''}';
@@ -322,6 +406,7 @@ class PassengerFirebaseService {
         'emailVerifiedAt': FieldValue.serverTimestamp(),
         'pendingEmail': FieldValue.delete(),
       }, SetOptions(merge: true));
+      await _syncLoginAlias(uid, '${(await _db.collection('users').doc(uid).get()).data()?['idNumber'] ?? ''}', cleanEmail);
       return true;
     }
     await _db.collection('users').doc(uid).set({
@@ -352,43 +437,16 @@ class PassengerFirebaseService {
         'emailVerifiedAt': FieldValue.serverTimestamp(),
         'pendingEmail': FieldValue.delete(),
       }, SetOptions(merge: true));
+      await _syncLoginAlias(uid, '${(await userRef.get()).data()?['idNumber'] ?? ''}', email);
     }
     return (email: email, verified: verified);
   }
 
-  Future<void> sendPasswordResetLink({
-    required String firstName,
-    required String lastName,
-    required String email,
-  }) async {
-    final cleanFirst = firstName.trim();
-    final cleanLast = lastName.trim();
+  Future<void> sendPasswordResetLink({required String email}) async {
     final cleanEmail = email.trim().toLowerCase();
-    if (cleanFirst.isEmpty || cleanLast.isEmpty || cleanEmail.isEmpty) {
-      throw ArgumentError('Enter your first name, last name, and email.');
-    }
+    if (cleanEmail.isEmpty) throw ArgumentError('Enter your email address.');
     if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(cleanEmail)) {
       throw ArgumentError('Enter a valid email address.');
-    }
-    final matches = await _db
-        .collection('users')
-        .where('email', isEqualTo: cleanEmail)
-        .limit(5)
-        .get()
-        .timeout(const Duration(seconds: 15));
-    final matchingProfile = matches.docs.any((doc) {
-      final data = doc.data();
-      // Firestore's emailVerified flag can lag behind Firebase Auth when a
-      // passenger follows the verification link outside the app. Matching the
-      // profile establishes the requested identity fields; Firebase's reset
-      // link itself is the authoritative proof of inbox access.
-      return '${data['firstName'] ?? ''}'.trim().toLowerCase() ==
-              cleanFirst.toLowerCase() &&
-          '${data['lastName'] ?? ''}'.trim().toLowerCase() ==
-              cleanLast.toLowerCase();
-    });
-    if (!matchingProfile) {
-      throw StateError('The name and email do not match a passenger account.');
     }
     await _auth
         .sendPasswordResetEmail(email: cleanEmail)
@@ -523,6 +581,7 @@ class PassengerFirebaseService {
             status: '${data['status'] ?? 'idle'}',
             type: '${data['type'] ?? 'Jeep'}',
             speedKmh: _number(data['speedKmh']),
+            routeDirection: data['routeDirection'] as String?,
             lastGpsAt: (data['lastGpsAt'] as Timestamp?)?.toDate(),
           );
         })
@@ -537,39 +596,82 @@ class PassengerFirebaseService {
         .toList();
   }
 
-  Stream<List<BusLocation>> watchBusLocations() => _db
-      .collection('vehicles')
-      .snapshots()
-      .map(
-        (snapshot) => snapshot.docs
-            .where((doc) => doc.data()['archived'] != true)
-            .map((doc) {
-              final data = doc.data();
-              final location = data['location'];
-              final point = location is GeoPoint ? location : null;
-              return BusLocation(
-                id: doc.id,
-                label: '${data['name'] ?? doc.id}',
-                latitude: point?.latitude ?? _number(data['latitude']),
-                longitude: point?.longitude ?? _number(data['longitude']),
-                status: '${data['status'] ?? 'idle'}',
-                type: '${data['type'] ?? 'Jeep'}',
-                speedKmh: _number(data['speedKmh']),
-                lastGpsAt: (data['lastGpsAt'] as Timestamp?)?.toDate(),
-              );
-            })
-            .where(
-              (bus) =>
-                  bus.hasFreshGps &&
-                  bus.latitude.isFinite &&
-                  bus.longitude.isFinite &&
-                  bus.latitude.abs() <= 90 &&
-                  bus.longitude.abs() <= 180 &&
-                  bus.latitude != 0 &&
-                  bus.longitude != 0,
-            )
-            .toList(),
-      );
+  Stream<List<BusLocation>> watchBusLocations() {
+    late StreamSubscription<QuerySnapshot<Map<String, dynamic>>> vehiclesSub;
+    late StreamSubscription<QuerySnapshot<Map<String, dynamic>>> tripsSub;
+    QuerySnapshot<Map<String, dynamic>>? vehicles;
+    QuerySnapshot<Map<String, dynamic>>? trips;
+    final controller = StreamController<List<BusLocation>>(
+      onCancel: () async {
+        await vehiclesSub.cancel();
+        await tripsSub.cancel();
+      },
+    );
+    void emit() {
+      final current = vehicles;
+      if (current == null || controller.isClosed) return;
+      final now = DateTime.now();
+      final candidates = <String, List<Map<String, dynamic>>>{};
+      for (final trip in trips?.docs ?? <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+        final data = trip.data();
+        final vehicleId = '${data['vehicleId'] ?? ''}';
+        if (vehicleId.isEmpty || data['status'] != 'onboard' ||
+            data['phoneLocation'] is! GeoPoint || data['phoneGpsAt'] is! Timestamp ||
+            (_number(data['phoneGpsAccuracyMeters'], fallback: 999) > 30)) continue;
+        final age = now.difference((data['phoneGpsAt'] as Timestamp).toDate());
+        if (age.isNegative || age > const Duration(seconds: 10)) continue;
+        candidates.putIfAbsent(vehicleId, () => []).add(data);
+      }
+      final result = <BusLocation>[];
+      for (final doc in current.docs) {
+        final data = doc.data();
+        if (data['archived'] == true) continue;
+        final point = data['location'];
+        final hardware = point is GeoPoint ? point : null;
+        final hardwareAt = data['lastGpsAt'] as Timestamp?;
+        GeoPoint? effective = hardware;
+        DateTime? effectiveAt = hardwareAt?.toDate();
+        var locationSource = 'hardware';
+        final available = candidates[doc.id] ?? [];
+        available.sort((a, b) =>
+            ((a['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
+                .compareTo((b['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
+        for (final candidate in available) {
+          final phone = candidate['phoneLocation'] as GeoPoint;
+          final phoneAt = (candidate['phoneGpsAt'] as Timestamp).toDate();
+          if (hardware == null || hardwareAt == null ||
+              !phoneAt.isAfter(hardwareAt.toDate()) ||
+              now.difference(hardwareAt.toDate()) > const Duration(seconds: 120) ||
+              geo.Geolocator.distanceBetween(phone.latitude, phone.longitude,
+                  hardware.latitude, hardware.longitude) > 500) continue;
+          effective = phone;
+          effectiveAt = phoneAt;
+          locationSource = 'phone';
+          break;
+        }
+        final bus = BusLocation(
+          id: doc.id, label: '${data['name'] ?? doc.id}',
+          latitude: effective?.latitude ?? _number(data['latitude']),
+          longitude: effective?.longitude ?? _number(data['longitude']),
+          status: '${data['status'] ?? 'idle'}', type: '${data['type'] ?? 'Jeep'}',
+          speedKmh: _number(data['speedKmh']),
+          routeDirection: data['routeDirection'] as String?, lastGpsAt: effectiveAt,
+          locationSource: locationSource,
+        );
+        if (bus.hasFreshGps && bus.latitude.isFinite && bus.longitude.isFinite &&
+            bus.latitude.abs() <= 90 && bus.longitude.abs() <= 180 &&
+            (bus.latitude != 0 || bus.longitude != 0)) result.add(bus);
+      }
+      controller.add(result);
+    }
+    vehiclesSub = _db.collection('vehicles').snapshots().listen(
+      (snapshot) { vehicles = snapshot; emit(); }, onError: controller.addError);
+    tripsSub = _db.collection('trips')
+        .where('userId', isEqualTo: _auth.currentUser?.uid ?? '__signed_out__')
+        .snapshots().listen((snapshot) { trips = snapshot; emit(); },
+            onError: controller.addError);
+    return controller.stream;
+  }
 
   Future<List<Map<String, dynamic>>> getRoutes() async {
     final snapshot = await _db
@@ -647,6 +749,13 @@ class PassengerFirebaseService {
     };
   }
 
+  Future<double> getMinimumTopUpCredits() async {
+    final snapshot = await _db.collection('settings').doc('credits').get(
+      const GetOptions(source: Source.server),
+    );
+    return (snapshot.data()?['minimumTopUpCredits'] as num?)?.toDouble() ?? 1;
+  }
+
   Future<List<TopUpRequest>> getTopUpRequests(String uid) async {
     final snapshot = await _db
         .collection('topUpRequests')
@@ -676,6 +785,10 @@ class PassengerFirebaseService {
     if (!amount.isFinite || amount <= 0 || amount > 10000) {
       throw ArgumentError('Enter a valid top-up amount.');
     }
+    final minimum = await getMinimumTopUpCredits();
+    if (amount < minimum) {
+      throw ArgumentError('Minimum top-up is PHP ${minimum.toStringAsFixed(2)}.');
+    }
     if (screenshotBytes.isEmpty || screenshotBytes.length > 800 * 1024) {
       throw ArgumentError('Use a receipt image smaller than 800 KB.');
     }
@@ -701,26 +814,8 @@ class PassengerFirebaseService {
     final passengerName =
         '${profileData['firstName'] ?? ''} ${profileData['lastName'] ?? ''}'
             .trim();
-    onProgress?.call('Checking for an existing request...');
-    final previous = await _db
-        .collection('topUpRequests')
-        .where('referenceNumber', isEqualTo: referenceNumber.trim())
-        .get(const GetOptions(source: Source.server))
-        .timeout(const Duration(seconds: 15));
-    final hasActiveReference = previous.docs.any((doc) {
-      final data = doc.data();
-      final status = '${data['status'] ?? 'pending'}'.trim().toLowerCase();
-      return '${data['referenceNumber'] ?? ''}'.trim() ==
-              referenceNumber.trim() &&
-          (status == 'pending' || status == 'approved');
-    });
-    if (hasActiveReference) {
-      throw StateError(
-        'This GCash reference already has a pending or approved request. Check Transaction Records.',
-      );
-    }
-    // Check across all passengers. Rejected attempts remain in history and
-    // may be resubmitted, but pending and approved references cannot.
+    // The administrator checks reference uniqueness before approval. Reading
+    // every passenger's requests here would expose their private receipts.
     final requestRef = _db.collection('topUpRequests').doc();
     onProgress?.call('Saving receipt and request for admin review...');
     await requestRef
@@ -788,6 +883,11 @@ class PassengerFirebaseService {
       throw StateError('You already have a pending trip. View it from Home.');
     }
     final user = await _db.collection('users').doc(uid).get();
+    if (!user.exists || user.data()?['active'] == false) {
+      throw StateError(
+        'This account is inactive. Please contact the administrator.',
+      );
+    }
     final bookingRef = _db.collection('trips').doc();
     final batch = _db.batch();
     batch.set(bookingRef, {
@@ -878,167 +978,56 @@ class PassengerFirebaseService {
     String uid,
     String bookingId,
     String vehicleId,
-    String vehicleType,
-  ) async {
-    final userRef = _db.collection('users').doc(uid);
-    final tripRef = _db.collection('trips').doc(bookingId);
-    final vehicleRef = _db.collection('vehicles').doc(vehicleId);
-    await _db.runTransaction((transaction) async {
-      final userSnapshot = await transaction.get(userRef);
-      final tripSnapshot = await transaction.get(tripRef);
-      final vehicleSnapshot = await transaction.get(vehicleRef);
-      final user = userSnapshot.data();
-      final trip = tripSnapshot.data();
-      final vehicle = vehicleSnapshot.data();
-      if (user == null || trip == null || trip['userId'] != uid) {
-        throw StateError('Booking not found.');
-      }
-      if (trip['status'] != 'waiting') {
-        throw StateError('This booking was already boarded.');
-      }
-      final createdAt = trip['createdAt'];
-      if (createdAt is Timestamp &&
-          DateTime.now().difference(createdAt.toDate()) >=
-              const Duration(minutes: 10)) {
-        throw StateError(
-          'This booking expired after 10 minutes. Please book again.',
-        );
-      }
-      if (vehicle == null ||
-          vehicle['archived'] == true ||
-          vehicle['type'] != vehicleType ||
-          !const {
-            'active',
-            'idle',
-            'onroute',
-          }.contains('${vehicle['status'] ?? ''}'.toLowerCase()) ||
-          !vehicleGpsIsFresh(vehicle)) {
-        throw StateError(
-          'This vehicle is not active or the QR code is invalid.',
-        );
-      }
-      final count = (trip['passengerCount'] as num?)?.toInt() ?? 1;
-      final onboard = (vehicle['onBoardPassengers'] as num?)?.toInt() ?? 0;
-      final capacity = (vehicle['passengerCapacity'] as num?)?.toInt() ?? 0;
-      if (capacity > 0 && onboard + count > capacity) {
-        throw StateError('This vehicle is full.');
-      }
-      final fare = _number(trip['fare']);
-      final balance = _number(user['balance']);
-      final destinationRouteId = '${trip['destinationRouteId'] ?? ''}'.trim();
-      final expected = Map<String, dynamic>.from(
-        vehicle['expectedOutboardByStop'] is Map
-            ? vehicle['expectedOutboardByStop'] as Map
-            : const <String, dynamic>{},
-      );
-      if (destinationRouteId.isNotEmpty) {
-        expected[destinationRouteId] =
-            ((expected[destinationRouteId] as num?)?.toInt() ?? 0) + count;
-      }
-      if (balance < fare) {
-        throw StateError('Insufficient credits. Please top up first.');
-      }
-      transaction.update(userRef, {'balance': balance - fare});
-      transaction.update(tripRef, {
-        'status': 'onboard',
-        'vehicleId': vehicleId,
-        'vehicleName': vehicle['name'],
-        'vehicleType': vehicleType,
-        'driverId': vehicle['driverId'],
-        'driverName': vehicle['driverName'],
-        'boardedAt': FieldValue.serverTimestamp(),
-      });
-      transaction.update(vehicleRef, {
-        'onBoardPassengers': onboard + count,
-        'expectedOutboardByStop': expected,
-        'tripPassengerCount': FieldValue.increment(count),
-        'tripIncome': FieldValue.increment(fare),
-      });
-      final transactionRef = _db.collection('transactions').doc();
-      transaction.set(transactionRef, {
-        'userId': uid,
-        'passengerName': '${user['firstName'] ?? ''} ${user['lastName'] ?? ''}'
-            .trim(),
-        'userType': '${user['userType'] ?? 'Passenger'}',
-        'title': 'Ride to ${trip['destination'] ?? 'destination'}',
-        'description': 'Ride to ${trip['destination'] ?? 'destination'}',
-        'amount': -fare,
-        'type': 'fare',
-        'createdAt': FieldValue.serverTimestamp(),
-        'tripId': bookingId,
-        'vehicleId': vehicleId,
-        'vehicleName': vehicle['name'],
-      });
-      final notificationRef = _db.collection('notifications').doc();
-      transaction.set(notificationRef, {
-        'userId': uid,
-        'type': 'boarded',
-        'title': 'You are onboard',
-        'message': 'PHP ${fare.toStringAsFixed(2)} was charged for your ride.',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+    String vehicleType, {
+    required double confirmedFare,
+    required String confirmedDirection,
+  }) async {
+    await _trustedRequest('/api/board', {
+      'bookingId': bookingId,
+      'vehicleId': vehicleId,
+      'vehicleType': vehicleType,
+      'confirmedFare': confirmedFare,
+      'confirmedDirection': confirmedDirection,
     });
     return getProfile(uid);
   }
 
+  Future<({double fare, String direction, String directionLabel, String fareType})> previewBoardingFare(
+      String bookingId, String vehicleId) async {
+    final results = await Future.wait([
+      _db.collection('trips').doc(bookingId).get(),
+      _db.collection('vehicles').doc(vehicleId).get(),
+    ]);
+    final trip = results[0].data();
+    final vehicle = results[1].data();
+    if (trip == null || vehicle == null || trip['status'] != 'waiting' ||
+        !vehicleGpsIsFresh(vehicle)) {
+      throw StateError('Booking or vehicle is no longer available.');
+    }
+    final direction = '${vehicle['routeDirection'] ?? ''}';
+    if (!const {'towardLastStop', 'towardFirstStop'}.contains(direction)) {
+      throw StateError('Vehicle direction is not available yet.');
+    }
+    final routes = await getRoutes();
+    final pickup = routes.indexWhere((r) => r['id'] == trip['pickupRouteId']);
+    final dropOff = routes.indexWhere((r) => r['id'] == trip['destinationRouteId']);
+    if (pickup < 0 || dropOff < 0 || pickup == dropOff) {
+      throw StateError('The booked route is no longer active.');
+    }
+    final roundTrip = direction == 'towardLastStop'
+        ? dropOff < pickup : dropOff > pickup;
+    final fares = await getFareSettings();
+    final count = (trip['passengerCount'] as num?)?.toInt() ?? 1;
+    return (fare: (roundTrip ? fares.roundTripFare : fares.defaultFare) * count,
+        direction: direction,
+        directionLabel: direction == 'towardLastStop'
+            ? '${routes.first['name']} → ${routes.last['name']}'
+            : '${routes.last['name']} → ${routes.first['name']}',
+        fareType: roundTrip ? 'Round trip' : 'Regular');
+  }
+
   Future<void> completeRide(String uid, String bookingId) async {
-    final tripRef = _db.collection('trips').doc(bookingId);
-    final notificationRef = _db.collection('notifications').doc();
-    await _db.runTransaction((transaction) async {
-      final tripSnapshot = await transaction.get(tripRef);
-      final trip = tripSnapshot.data();
-      if (trip == null || trip['userId'] != uid) {
-        throw StateError('Booking not found.');
-      }
-      if (trip['status'] != 'onboard' && trip['status'] != 'boarded') {
-        throw StateError('The ride must be boarded first.');
-      }
-      final vehicleId = trip['vehicleId'] as String?;
-      final vehicleRef = vehicleId == null
-          ? null
-          : _db.collection('vehicles').doc(vehicleId);
-      final vehicle = vehicleRef == null
-          ? null
-          : await transaction.get(vehicleRef);
-      final count = (trip['passengerCount'] as num?)?.toInt() ?? 1;
-      if (vehicleRef != null && vehicle?.exists == true) {
-        final onboard =
-            (vehicle?.data()?['onBoardPassengers'] as num?)?.toInt() ?? 0;
-        final destinationRouteId = '${trip['destinationRouteId'] ?? ''}'.trim();
-        final expected = Map<String, dynamic>.from(
-          vehicle?.data()?['expectedOutboardByStop'] is Map
-              ? vehicle!.data()!['expectedOutboardByStop'] as Map
-              : const <String, dynamic>{},
-        );
-        if (destinationRouteId.isNotEmpty) {
-          final remaining =
-              (((expected[destinationRouteId] as num?)?.toInt() ?? 0) - count)
-                  .clamp(0, 999999999);
-          if (remaining == 0) {
-            expected.remove(destinationRouteId);
-          } else {
-            expected[destinationRouteId] = remaining;
-          }
-        }
-        transaction.update(vehicleRef, {
-          'onBoardPassengers': (onboard - count).clamp(0, 999999999),
-          'outBoardPassengers': FieldValue.increment(count),
-          'expectedOutboardByStop': expected,
-        });
-      }
-      transaction.update(tripRef, {
-        'status': 'arrived',
-        'completedAt': FieldValue.serverTimestamp(),
-      });
-      transaction.set(notificationRef, {
-        'userId': uid,
-        'type': 'completed',
-        'title': 'You have arrived',
-        'message':
-            'You arrived at ${trip['destination'] ?? 'your destination'}.',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    });
+    await _trustedRequest('/api/arrive', {'bookingId': bookingId});
   }
 
   Future<void> cancelBooking(
@@ -1099,7 +1088,7 @@ class PassengerFirebaseService {
     final encoded = base64Url
         .encode(utf8.encode(idNumber.trim().toUpperCase()))
         .replaceAll('=', '');
-    return 'passenger_$encoded@ikot-lasalle-ccfab.firebaseapp.com';
+    return 'passenger_$encoded@${core.Firebase.app().options.projectId}.firebaseapp.com';
   }
 
   static Passenger _passenger(String uid, Map<String, dynamic> data) =>

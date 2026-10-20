@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/export_service.dart';
 import '../services/firebase_service.dart';
 import '../services/pick_excel.dart';
@@ -9,11 +10,15 @@ import '../widgets/common.dart';
 import '../widgets/table_pagination.dart';
 
 typedef AppUser = ({
+  String uid,
   String first,
   String last,
   String id,
   String type,
   String contact,
+  bool active,
+  bool archived,
+  String inactiveReason,
 });
 
 class UsersPage extends StatefulWidget {
@@ -32,6 +37,9 @@ class _UsersPageState extends State<UsersPage> {
   int rowsPerPage = 15;
   bool importing = false;
   String? importStatus;
+  final selectedIds = <String>{};
+  bool bulkSaving = false;
+  bool showArchived = false;
 
   @override
   void initState() {
@@ -45,14 +53,22 @@ class _UsersPageState extends State<UsersPage> {
             snapshot.docs.map((doc) {
               final data = doc.data();
               return (
+                uid: doc.id,
                 first: data['firstName'] as String? ?? '',
                 last: data['lastName'] as String? ?? '',
                 id: data['idNumber'] as String? ?? '',
                 type: data['userType'] as String? ?? 'Student',
                 contact: data['contactNumber'] as String? ?? '',
+                active: data['active'] != false,
+                archived: data['archived'] == true ||
+                    (data['active'] == false && data['inactiveReason'] == 'Graduated'),
+                inactiveReason: '${data['inactiveReason'] ?? ''}',
               );
             }),
           );
+        selectedIds.removeWhere(
+          (id) => !users.any((u) => u.uid == id && !u.archived),
+        );
       });
     });
   }
@@ -73,10 +89,43 @@ class _UsersPageState extends State<UsersPage> {
       context,
       title: 'Create user account',
       action: 'Create account',
+      onSave: () {
+        final cleanId = id.text.trim().toUpperCase();
+        if (!validPassengerIdNumber(cleanId)) {
+          _notice('Passenger ID number must be exactly 9 digits.');
+          return;
+        }
+        if (users.any((user) => user.id.trim().toUpperCase() == cleanId)) {
+          _notice('Passenger ID number is already registered.');
+          return;
+        }
+        unawaited(
+          _saveUser({
+            'firstName': first.text,
+            'lastName': last.text,
+            'idNumber': id.text,
+            'userType': type,
+          }),
+        );
+      },
       fields: [
-        FormFieldBox('First name', controller: first),
-        FormFieldBox('Last name', controller: last),
-        FormFieldBox('Passenger ID number', controller: id),
+        FormFieldBox(
+          'First name',
+          controller: first,
+          inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))],
+        ),
+        FormFieldBox(
+          'Last name',
+          controller: last,
+          inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))],
+        ),
+        FormFieldBox(
+          'Passenger ID number',
+          controller: id,
+          maxLength: passengerIdNumberLength,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        ),
         DropdownButtonFormField<String>(
           initialValue: 'Student',
           decoration: const InputDecoration(labelText: 'User type'),
@@ -89,22 +138,88 @@ class _UsersPageState extends State<UsersPage> {
           onChanged: (value) => type = value ?? 'Student',
         ),
         const Text(
-          'Initial password: LAST NAME in uppercase.',
+          'Initial password: LAST NAME in uppercase. Names shorter than 6 characters are padded with 0.',
           style: TextStyle(
             color: Color(0xFF08783E),
             fontWeight: FontWeight.w700,
           ),
         ),
       ],
-      onSave: () => unawaited(
-        _saveUser({
-          'firstName': first.text,
-          'lastName': last.text,
-          'idNumber': id.text,
-          'userType': type,
-        }),
-      ),
     );
+  }
+
+  void _edit(AppUser user) {
+    final first = TextEditingController(text: user.first);
+    final last = TextEditingController(text: user.last);
+    final id = TextEditingController(text: user.id);
+    final contact = TextEditingController(text: user.contact);
+    var type = user.type;
+    showFormDialog(
+      context,
+      title: 'Edit passenger account',
+      action: 'Save changes',
+      fields: [
+        FormFieldBox(
+          'First name',
+          controller: first,
+          inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))],
+        ),
+        FormFieldBox(
+          'Last name',
+          controller: last,
+          inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))],
+        ),
+        FormFieldBox(
+          'Passenger ID number',
+          controller: id,
+          maxLength: passengerIdNumberLength,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        ),
+        FormFieldBox('Contact number', controller: contact),
+        DropdownButtonFormField<String>(
+          initialValue:
+              const {'Student', 'Teacher', 'Visitor', 'Staff'}.contains(type)
+              ? type
+              : 'Student',
+          decoration: const InputDecoration(labelText: 'User type'),
+          items: const [
+            DropdownMenuItem(value: 'Student', child: Text('Student')),
+            DropdownMenuItem(value: 'Teacher', child: Text('Teacher')),
+            DropdownMenuItem(value: 'Visitor', child: Text('Visitor')),
+            DropdownMenuItem(value: 'Staff', child: Text('Staff')),
+          ],
+          onChanged: (value) => type = value ?? 'Student',
+        ),
+      ],
+      onSave: () {
+        if (!validPassengerIdNumber(id.text)) {
+          _notice('Passenger ID number must be exactly 9 digits.');
+          return;
+        }
+        unawaited(
+          _saveEdit(user.uid, {
+            'firstName': first.text,
+            'lastName': last.text,
+            'idNumber': id.text,
+            'contactNumber': contact.text,
+            'userType': type,
+          }),
+        );
+      },
+    );
+  }
+
+  Future<void> _saveEdit(String uid, Map<String, dynamic> data) async {
+    try {
+      await FirebaseService.instance.updatePassengerAccount(
+        userId: uid,
+        data: data,
+      );
+      if (mounted) _notice('Passenger account updated.');
+    } catch (error) {
+      if (mounted) _notice('Could not update account: $error');
+    }
   }
 
   Future<void> _saveUser(Map<String, dynamic> data) async {
@@ -126,8 +241,8 @@ class _UsersPageState extends State<UsersPage> {
 
   Future<void> _exportUsers() async {
     try {
-      await ExportService.excel(
-        fileName: 'passenger_users.xlsx',
+      await ExportService.pdf(
+        fileName: 'passenger_users.pdf',
         title: 'Passenger users',
         headers: _headers,
         rows: users.map((u) => [u.first, u.last, u.id, u.type]).toList(),
@@ -174,6 +289,10 @@ class _UsersPageState extends State<UsersPage> {
         final values = List.generate(_headers.length, (j) => _cell(row, j));
         if (values.every((v) => v.isEmpty)) continue;
         final [first, last, id, type] = values;
+        if (!validPassengerIdNumber(id)) {
+          errors.add('Row ${i + 1}: ID number must be exactly 9 digits');
+          continue;
+        }
         if (first.isEmpty ||
             last.isEmpty ||
             id.isEmpty ||
@@ -281,10 +400,74 @@ class _UsersPageState extends State<UsersPage> {
   void _notice(String text) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
+  Future<void> _bulkArchive() async {
+    final selected = users
+        .where((u) => selectedIds.contains(u.uid) && !u.archived)
+        .toList();
+    if (selected.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+          title: const Text('Archive selected users?'),
+          content: Text(
+            '${selected.length} account(s) will lose access. Their history will remain and they can be restored later.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Archive'),
+            ),
+          ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => bulkSaving = true);
+    try {
+      final count = await FirebaseService.instance.archivePassengers(
+        selected.map((u) => u.uid).toList(),
+      );
+      if (mounted) {
+        setState(selectedIds.clear);
+        _notice('$count account(s) archived.');
+      }
+    } catch (error) {
+      if (mounted) _notice('Could not archive users: $error');
+    } finally {
+      if (mounted) setState(() => bulkSaving = false);
+    }
+  }
+
+  Future<void> _restore(AppUser user) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restore account?'),
+        content: Text('Restore ${user.first} ${user.last} as ${user.type}? '
+            'To restore a graduate as a visitor, edit the user type to Visitor first.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Restore')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await FirebaseService.instance.restorePassenger(user.uid);
+      if (mounted) _notice('Account restored. The user can sign in again.');
+    } catch (error) {
+      if (mounted) _notice('Could not restore account: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final query = searchQuery.trim().toLowerCase();
     final filtered = users.where((user) {
+      if (user.archived != showArchived) return false;
       if (query.isEmpty) return true;
       final name = '${user.first} ${user.last}'.toLowerCase();
       return name.contains(query) ||
@@ -310,12 +493,24 @@ class _UsersPageState extends State<UsersPage> {
                 OutlinedButton.icon(
                   onPressed: importing ? null : _exportUsers,
                   icon: const Icon(Icons.download),
-                  label: const Text('Export Excel / template'),
+                  label: const Text('Export PDF'),
                 ),
                 OutlinedButton.icon(
                   onPressed: importing ? null : _importUsers,
                   icon: const Icon(Icons.upload_file),
                   label: const Text('Import Excel'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: bulkSaving || selectedIds.isEmpty || showArchived
+                      ? null
+                      : _bulkArchive,
+                  icon: const Icon(Icons.archive_outlined),
+                  label: Text('Archive selected (${selectedIds.length})'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => setState(() { showArchived = !showArchived; page = 0; selectedIds.clear(); }),
+                  icon: Icon(showArchived ? Icons.people_outline : Icons.archive_outlined),
+                  label: Text(showArchived ? 'Show active users' : 'Show archive'),
                 ),
                 FilledButton.icon(
                   onPressed: importing ? null : _create,
@@ -362,13 +557,16 @@ class _UsersPageState extends State<UsersPage> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  const Row(
+                  Row(
                     children: [
-                      Expanded(child: Text('Full name', style: _head)),
+                      const SizedBox(width: 96),
+                      Expanded(flex: 3, child: Text('Full name', style: _head)),
                       Expanded(child: Text('ID number', style: _head)),
                       Expanded(child: Text('User type', style: _head)),
                       Expanded(child: Text('Contact', style: _head)),
                       Expanded(child: Text('Password policy', style: _head)),
+                      const Expanded(child: Text('Status', style: _head)),
+                      const SizedBox(width: 96),
                     ],
                   ),
                   const Divider(),
@@ -382,7 +580,23 @@ class _UsersPageState extends State<UsersPage> {
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       child: Row(
                         children: [
+                          SizedBox(
+                            width: 48,
+                            child: Checkbox(
+                              value: selectedIds.contains(user.uid),
+                              onChanged: !user.archived && !bulkSaving
+                                  ? (value) => setState(() {
+                                      if (value == true) {
+                                        selectedIds.add(user.uid);
+                                      } else {
+                                        selectedIds.remove(user.uid);
+                                      }
+                                    })
+                                  : null,
+                            ),
+                          ),
                           Expanded(
+                            flex: 3,
                             child: Text(
                               '${user.first} ${user.last}',
                               style: const TextStyle(
@@ -394,6 +608,35 @@ class _UsersPageState extends State<UsersPage> {
                           Expanded(child: StatusPill(user.type)),
                           Expanded(child: Text(user.contact)),
                           const Expanded(child: Text('Change on first login')),
+                          Expanded(
+                            child: Text(
+                              user.archived
+                                  ? 'Archived'
+                                  : user.active
+                                  ? 'Active'
+                                  : user.inactiveReason.isEmpty
+                                  ? 'Inactive'
+                                  : user.inactiveReason,
+                            ),
+                          ),
+                          SizedBox(
+                            width: 96,
+                            child: Row(
+                              children: [
+                                IconButton(
+                                  tooltip: 'Edit user',
+                                  onPressed: () => _edit(user),
+                                  icon: const Icon(Icons.edit_outlined),
+                                ),
+                                if (user.archived)
+                                  IconButton(
+                                    tooltip: 'Restore user',
+                                    onPressed: () => _restore(user),
+                                    icon: const Icon(Icons.unarchive_outlined),
+                                  ),
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),

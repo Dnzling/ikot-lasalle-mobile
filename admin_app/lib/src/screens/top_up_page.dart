@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/firebase_service.dart';
 import '../widgets/common.dart';
@@ -25,6 +26,48 @@ Widget _receiptImage(
   return const Center(child: Icon(Icons.image_not_supported_outlined));
 }
 
+void _showReceiptFullScreen(BuildContext context, Map<String, dynamic> data) {
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black87,
+    builder: (context) => Dialog.fullscreen(
+      backgroundColor: Colors.black,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 6,
+              child: Center(
+                child: _receiptImage(data, fit: BoxFit.contain),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 12,
+            right: 12,
+            child: IconButton.filledTonal(
+              tooltip: 'Close image',
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+          const Positioned(
+            bottom: 18,
+            left: 0,
+            right: 0,
+            child: Text(
+              'Pinch or scroll to zoom',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class TopUpPage extends StatefulWidget {
   const TopUpPage({super.key});
 
@@ -35,6 +78,7 @@ class TopUpPage extends StatefulWidget {
 class _TopUpPageState extends State<TopUpPage> {
   final searchController = TextEditingController();
   String searchQuery = '';
+  String statusFilter = 'all';
   int page = 0;
   int rowsPerPage = 15;
 
@@ -53,22 +97,18 @@ class _TopUpPageState extends State<TopUpPage> {
       if (snapshot.hasError) {
         return Center(
           child: Text(
-            'Could not load top-up requests from Firebase.\n${snapshot.error}',
+            'Could not load top-up requests from the server.\n${snapshot.error}',
           ),
         );
       }
       final requests =
           snapshot.data?.docs ??
           const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-      final pending = requests.where((doc) => _status(doc) == 'pending').length;
-      final approved = requests
-          .where((doc) => _status(doc) == 'approved')
-          .length;
-      final rejected = requests
-          .where((doc) => _status(doc) == 'rejected')
-          .length;
       final query = searchQuery.trim().toLowerCase();
       final filtered = requests.where((request) {
+        if (statusFilter != 'all' && _status(request) != statusFilter) {
+          return false;
+        }
         if (query.isEmpty) return true;
         final data = request.data();
         return '${data['passengerName'] ?? ''}'.toLowerCase().contains(query) ||
@@ -89,44 +129,24 @@ class _TopUpPageState extends State<TopUpPage> {
               title: 'Top-up requests',
               subtitle:
                   'Review passenger GCash payments and credit approved requests.',
-              action: FilledButton.icon(
-                onPressed: () => _configureGcash(context),
-                icon: const Icon(Icons.settings_phone_outlined),
-                label: const Text('GCash account'),
+              action: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => _manualTopUp(context),
+                    icon: const Icon(Icons.add_card),
+                    label: const Text('Manual top-up'),
+                  ),
+                  const SizedBox(width: 10),
+                  OutlinedButton.icon(
+                    onPressed: () => _configureGcash(context),
+                    icon: const Icon(Icons.settings_phone_outlined),
+                    label: const Text('GCash account'),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 22),
-            Row(
-              children: [
-                Expanded(
-                  child: _Metric(
-                    'PENDING',
-                    '$pending',
-                    Icons.pending_actions_outlined,
-                    const Color(0xFF9A6100),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _Metric(
-                    'APPROVED',
-                    '$approved',
-                    Icons.check_circle_outline,
-                    const Color(0xFF08783E),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _Metric(
-                    'REJECTED',
-                    '$rejected',
-                    Icons.cancel_outlined,
-                    const Color(0xFFB3261E),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(20),
@@ -137,6 +157,23 @@ class _TopUpPageState extends State<TopUpPage> {
                       )
                     : Column(
                         children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(value: 'all', label: Text('All')),
+                                ButtonSegment(value: 'pending', label: Text('Pending')),
+                                ButtonSegment(value: 'approved', label: Text('Approved')),
+                                ButtonSegment(value: 'rejected', label: Text('Rejected')),
+                              ],
+                              selected: {statusFilter},
+                              onSelectionChanged: (selection) => setState(() {
+                                statusFilter = selection.first;
+                                page = 0;
+                              }),
+                            ),
+                          ),
+                          const SizedBox(height: 18),
                           TextField(
                             controller: searchController,
                             onChanged: (value) => setState(() {
@@ -169,7 +206,7 @@ class _TopUpPageState extends State<TopUpPage> {
                               child: Text(
                                 requests.isEmpty
                                     ? 'No top-up requests yet.'
-                                    : 'No top-up requests match your search.',
+                                    : 'No top-up requests match your filters.',
                               ),
                             )
                           else ...[
@@ -202,6 +239,115 @@ class _TopUpPageState extends State<TopUpPage> {
 
   static String _status(QueryDocumentSnapshot<Map<String, dynamic>> doc) =>
       '${doc.data()['status'] ?? 'pending'}'.toLowerCase();
+
+  static Future<void> _manualTopUp(BuildContext context) async {
+    final search = TextEditingController();
+    final amount = TextEditingController();
+    String? selectedId;
+    String? selectedName;
+    bool saving = false;
+    String? error;
+    final usersFuture = FirebaseService.instance.db.collection('users').get();
+    final settingsFuture = FirebaseService.instance.getCreditSettings();
+    final users = await usersFuture;
+    final minimum = (await settingsFuture).minimumTopUp;
+    if (!context.mounted) return;
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            final query = search.text.trim().toLowerCase();
+            final matches = users.docs.where((doc) {
+              final data = doc.data();
+              if (data['active'] == false || data['archived'] == true ||
+                  '${data['userType'] ?? ''}'.toLowerCase() == 'admin') return false;
+              final name = '${data['firstName'] ?? ''} ${data['lastName'] ?? ''}'.trim();
+              return query.isEmpty || name.toLowerCase().contains(query) ||
+                  '${data['idNumber'] ?? ''}'.contains(query);
+            }).take(20).toList();
+            return AlertDialog(
+              title: const Text('Manual top-up'),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: search,
+                      onChanged: (_) => setDialogState(() {}),
+                      decoration: const InputDecoration(
+                        labelText: 'Search passenger name or ID',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                    ),
+                    SizedBox(
+                      height: 180,
+                      child: ListView(
+                        children: [
+                          for (final doc in matches)
+                            ListTile(
+                              dense: true,
+                              selected: selectedId == doc.id,
+                              title: Text('${doc.data()['firstName'] ?? ''} ${doc.data()['lastName'] ?? ''}'.trim()),
+                              subtitle: Text('${doc.data()['idNumber'] ?? ''}'),
+                              onTap: saving ? null : () => setDialogState(() {
+                                selectedId = doc.id;
+                                selectedName = '${doc.data()['firstName'] ?? ''} ${doc.data()['lastName'] ?? ''}'.trim();
+                              }),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (selectedName != null) Text('Selected: $selectedName'),
+                    TextField(
+                      controller: amount,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                      decoration: const InputDecoration(labelText: 'Top-up amount (credits)'),
+                    ),
+                    Text('Minimum: ${minimum.toStringAsFixed(2)} credits'),
+                    if (error != null) Text(error!, style: const TextStyle(color: Colors.red)),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: saving ? null : () => Navigator.pop(dialogContext),
+                    child: const Text('Cancel')),
+                FilledButton(
+                  onPressed: saving ? null : () async {
+                    final value = double.tryParse(amount.text.trim());
+                    if (selectedId == null || value == null || value < minimum || value > 10000) {
+                      setDialogState(() => error = 'Select a passenger and enter ${minimum.toStringAsFixed(2)} to 10,000 credits.');
+                      return;
+                    }
+                    setDialogState(() { saving = true; error = null; });
+                    try {
+                      final reference = await FirebaseService.instance.manualTopUp(
+                          userId: selectedId!, amount: value);
+                      if (!dialogContext.mounted) return;
+                      Navigator.pop(dialogContext);
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text('Top-up credited. Reference: $reference')));
+                    } catch (e) {
+                      if (dialogContext.mounted) setDialogState(() {
+                        saving = false;
+                        error = '$e';
+                      });
+                    }
+                  },
+                  child: Text(saving ? 'Saving...' : 'Credit account'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      search.dispose();
+      amount.dispose();
+    }
+  }
 
   static Future<void> _configureGcash(BuildContext context) async {
     final nameController = TextEditingController();
@@ -292,50 +438,6 @@ class _TopUpPageState extends State<TopUpPage> {
   }
 }
 
-class _Metric extends StatelessWidget {
-  const _Metric(this.label, this.value, this.icon, this.color);
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(18),
-      child: Row(
-        children: [
-          CircleAvatar(
-            backgroundColor: color.withValues(alpha: .12),
-            child: Icon(icon, color: color),
-          ),
-          const SizedBox(width: 14),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 10,
-                  color: Colors.black45,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
 class _RequestHeader extends StatelessWidget {
   const _RequestHeader();
 
@@ -376,7 +478,10 @@ class _RequestRow extends StatelessWidget {
             height: 64,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: _receiptImage(data, fit: BoxFit.cover),
+              child: InkWell(
+                onTap: () => _showReceiptFullScreen(context, data),
+                child: _receiptImage(data, fit: BoxFit.cover),
+              ),
             ),
           ),
           const SizedBox(width: 12),
@@ -447,10 +552,13 @@ class _RequestRow extends StatelessWidget {
                     '${data['screenshotUrl'] ?? ''}'.isNotEmpty)
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: _receiptImage(
-                      data,
-                      height: 280,
-                      fit: BoxFit.contain,
+                    child: InkWell(
+                      onTap: () => _showReceiptFullScreen(context, data),
+                      child: _receiptImage(
+                        data,
+                        height: 280,
+                        fit: BoxFit.contain,
+                      ),
                     ),
                   ),
                 const SizedBox(height: 16),
