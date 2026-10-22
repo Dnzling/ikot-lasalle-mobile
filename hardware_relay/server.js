@@ -1,10 +1,12 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import admin from 'firebase-admin';
 import {handleAppApi} from './app_api.js';
 import {processOverstays} from './overstay.js';
 
 const port = Number(process.env.PORT || 8080);
+const privacyPolicyHtml = readFileSync(new URL('./privacy-policy.html', import.meta.url), 'utf8');
 const deviceIds = new Set((process.env.VEHICLE_DOCUMENT_IDS ||
     process.env.VEHICLE_DOCUMENT_ID || '').split(',').map((id) => id.trim()).filter(Boolean));
 const keyHex = process.env.RELAY_KEY_HEX || '';
@@ -161,7 +163,17 @@ async function execute(message) {
 }
 
 http.createServer(async (req, res) => {
-  if (req.method === 'GET' && req.url === '/health') {
+  const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+  if (req.method === 'GET' && pathname === '/privacy-policy') {
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=300',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(privacyPolicyHtml);
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/health') {
     res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'});
     res.end(JSON.stringify({ok: true}));
     return;

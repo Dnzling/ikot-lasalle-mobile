@@ -10,15 +10,10 @@
 #include <bearssl/bearssl.h>
 
 
-
-
 // Arduino IDE generates .ino function prototypes before the definitions below.
 // Forward-declare these types so those generated prototypes can compile.
 enum class CloudStatus : uint8_t;
 struct GpsCacheRecord;
-
-
-
 
 // =====================================================
 // SIM808 GPRS relay configuration
@@ -26,8 +21,7 @@ struct GpsCacheRecord;
 // Set RELAY_HOST to the public relay host, and use the same private 64-byte
 // hex key as the server. Never commit the real key.
 const char* SIM_APN = "internet";  // Smart
-// The SIM808 has successfully uploaded over plain HTTP through this tunnel.
-// Render HTTPS currently fails on this modem with HTTPACTION 603 (DNS error).
+// The SIM808 uses plain HTTP through the ngrok tunnel.
 const char* RELAY_HOST = "corset-coveting-thigh.ngrok-free.dev";
 const uint16_t RELAY_PORT = 80;
 const bool RELAY_USE_TLS = false;
@@ -568,7 +562,8 @@ const unsigned long ROUTE_SYNC_INTERVAL = 300000;
 const unsigned long ROUTE_RETRY_INTERVAL = 30000;
 const unsigned long FUELING_SYNC_INTERVAL = 300000;
 const unsigned long FUELING_RETRY_INTERVAL = 30000;
-const unsigned long GPS_UPLOAD_INTERVAL = 5000;
+// Match the working Jeep's cadence to avoid saturating the SIM808 GPRS bearer.
+const unsigned long GPS_UPLOAD_INTERVAL = 10000;
 const unsigned long GPS_RESTART_DELAY = 2000;
 const unsigned long SIM_RETRY_INTERVAL = 15000;
 
@@ -1697,6 +1692,8 @@ bool openRelayMessage(const String& envelope, const String& requestNonce,
 }
 
 bool relayHttpPost(const String& payload, String& response) {
+  bool reconnectBearerAfterFailure = false;
+  String failureReason;
   if (relayHttpActionPending) {
     if (millis() - relayHttpActionStarted < 120000) return false;
     // An earlier request never reported completion. Give it time before cleanup.
@@ -1769,8 +1766,26 @@ bool relayHttpPost(const String& payload, String& response) {
       return false;
     }
     relayHttpActionPending = false;
-    if (action.indexOf("+HTTPACTION: 1,200,") < 0) {
-      Serial.println("SIM808 relay HTTP request failed: " + action);
+    Serial.println("SIM808 HTTP action result: " + action);
+    const int firstComma = action.indexOf(',', actionMarker);
+    const int secondComma = firstComma < 0 ? -1 : action.indexOf(',', firstComma + 1);
+    int httpStatus = -1;
+    if (firstComma >= 0 && secondComma > firstComma) {
+      httpStatus = action.substring(firstComma + 1, secondComma).toInt();
+    }
+    if (httpStatus != 200) {
+      if (httpStatus == 601) {
+        failureReason = "SIM808 network error 601: no HTTP connection was established";
+        reconnectBearerAfterFailure = true;
+      } else if (httpStatus >= 600) {
+        failureReason = String("SIM808 transport error ") + httpStatus;
+        reconnectBearerAfterFailure = true;
+      } else if (httpStatus >= 0) {
+        failureReason = String("Relay returned HTTP status ") + httpStatus;
+      } else {
+        failureReason = "Could not parse SIM808 HTTPACTION status";
+      }
+      Serial.println("Relay upload failed: " + failureReason);
       cellularDataReady = false;
       break;
     }
@@ -1784,6 +1799,26 @@ bool relayHttpPost(const String& payload, String& response) {
     okay = true;
   } while (false);
   sendATCommand("AT+HTTPTERM", 3000);
+  if (reconnectBearerAfterFailure) {
+    // A stale PDP context can leave the SIM808 registered with an IP but unable
+    // to open a new TCP socket. Reopen it once, then let the normal upload
+    // schedule retry instead of hammering the modem.
+    Serial.println("Checking SIM808 link after relay transport failure");
+    sendATCommand("AT+CSQ", 3000);
+    sendATCommand("AT+CREG?", 3000);
+    sendATCommand("AT+CGATT?", 3000);
+    sendATCommand("AT+SAPBR=2,1", 3000);
+    Serial.println("Reopening SIM808 GPRS bearer before next upload retry");
+    sendATCommand("AT+SAPBR=0,1", 12000);
+    cellularDataReady = false;
+    delay(1000);
+    if (!connectCellularData()) {
+      Serial.println("SIM808 bearer recovery failed; will retry on the next scheduled upload");
+    }
+  }
+  if (!okay && !failureReason.isEmpty()) {
+    Serial.println("SIM808 relay failure detail: " + failureReason);
+  }
   return okay;
 }
 
