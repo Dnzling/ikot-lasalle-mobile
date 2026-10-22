@@ -59,9 +59,12 @@ to sign in by passenger ID. It calls the relay's authenticated
 `/api/recovery/start-verification` endpoint to send a one-time recovery-email
 verification link. The relay records the pending request with Admin SDK, then
 marks `recoveryEmail` verified only after the link is confirmed. Forgot Password
-calls the public `/api/recovery/request-reset` endpoint; it generates a Firebase
-password-reset action link for the passenger's existing Auth account and sends
-that link to the verified recovery email through Brevo.
+calls the public `/api/recovery/request-reset` endpoint; it creates a Firebase
+password-reset action code for the passenger's existing Auth account and sends
+a custom relay reset-page link to the verified recovery email through Brevo.
+The reset page displays the verified recovery email, accepts the new password,
+and submits it to Firebase without changing the Auth email. Afterward, the
+passenger continues to sign in with their passenger ID.
 
 Configure these Render environment variables on the relay service:
 

@@ -62,7 +62,7 @@ class ProfileScreen extends StatelessWidget {
                 color: Color(0xFF08783E),
               ),
               title: const Text(
-                'Email address',
+                'Recovery email',
                 style: TextStyle(fontSize: 12, color: Colors.black54),
               ),
               subtitle: Column(
@@ -114,7 +114,7 @@ class ProfileScreen extends StatelessWidget {
               ),
               isThreeLine: true,
               trailing: IconButton(
-                tooltip: 'Change email',
+                tooltip: 'Change recovery email',
                 onPressed: () => _editEmail(context, session),
                 icon: const Icon(Icons.edit_outlined),
               ),

@@ -1130,7 +1130,9 @@ class PassengerFirebaseService {
       Passenger.fromJson({
         'id': uid,
         ...data,
-        'email': data['recoveryEmail'] ?? data['email'] ?? '',
+        // Never surface Firebase Auth's internal/login email in passenger UI.
+        // Only the separately verified recovery address is user-facing.
+        'email': data['recoveryEmail'] ?? '',
         'emailVerified': data['recoveryEmailVerified'] == true,
       });
 

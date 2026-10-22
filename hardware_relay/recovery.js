@@ -10,6 +10,10 @@ function validEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254;
 }
 
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 function requireBrevo() {
   const apiKey = process.env.BREVO_API_KEY;
   const senderEmail = cleanEmail(process.env.BREVO_SENDER_EMAIL);
@@ -121,10 +125,23 @@ export async function requestRecoveryPasswordReset({admin, db, email, req}) {
       if (profile) {
         const user = await admin.auth().getUser(profile.id);
         if (user.email) {
-          const resetLink = await admin.auth().generatePasswordResetLink(user.email);
+          const firebaseLink = new URL(await admin.auth().generatePasswordResetLink(user.email));
+          const oobCode = firebaseLink.searchParams.get('oobCode');
+          const apiKey = firebaseLink.searchParams.get('apiKey');
+          if (!oobCode || !apiKey) throw new Error('Firebase did not create a valid reset action link.');
+          const resetRef = db.collection('recoveryPasswordResetTokens').doc(hashToken(oobCode));
+          await resetRef.set({uid: profile.id, email: target, apiKey,
+            expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 60 * 60 * 1000),
+            createdAt: admin.firestore.FieldValue.serverTimestamp()});
+          const resetLink = `${appUrl()}/reset-password?oobCode=${encodeURIComponent(oobCode)}`;
+          try {
           await sendBrevo({to: target, subject: 'Reset your Ikot La Salle password',
             text: `Use this secure link to reset your password: ${resetLink}\nAfter resetting, sign in with your passenger ID. If you did not request this, ignore this message.`,
             html: `<p>A password reset was requested for your Ikot La Salle account.</p><p><a href="${resetLink}">Reset password</a></p><p>After resetting, sign in with your passenger ID.</p><p>If you did not request this, ignore this message.</p>`});
+          } catch (error) {
+            await resetRef.delete().catch(() => {});
+            throw error;
+          }
         }
       }
     } catch (error) {
@@ -137,9 +154,12 @@ export async function requestRecoveryPasswordReset({admin, db, email, req}) {
 
 export async function handleRecoveryEmailAction(req, res, {admin, db}) {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname !== '/verify-recovery-email') return false;
+  if (!['/verify-recovery-email', '/reset-password'].includes(url.pathname)) return false;
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (url.pathname === '/reset-password') {
+    return handlePasswordResetPage(req, res, {admin, db, url});
+  }
   if (req.method === 'GET') {
     const token = url.searchParams.get('token') || '';
     if (!/^[A-Za-z0-9_-]{40,50}$/.test(token)) {
@@ -164,8 +184,15 @@ export async function handleRecoveryEmailAction(req, res, {admin, db}) {
     await db.runTransaction(async (tx) => {
       const tokenDoc = await tx.get(tokenRef);
       const data = tokenDoc.data();
-      if (!data || data.expiresAt.toMillis() <= Date.now()) {
-        throw new Error('Verification link is invalid or expired. Request a new one in the app.');
+      if (!data) {
+        throw new Error('Verification token was not found. Request a new link in the app.');
+      }
+      const expiry = data.expiresAt?.toMillis?.();
+      if (!expiry) {
+        throw new Error('Verification token is missing its expiration time. Request a new link.');
+      }
+      if (expiry <= Date.now()) {
+        throw new Error('Verification link has expired. Request a new link in the app.');
       }
       const userRef = db.collection('users').doc(data.uid);
       const userDoc = await tx.get(userRef);
@@ -186,7 +213,77 @@ export async function handleRecoveryEmailAction(req, res, {admin, db}) {
     res.writeHead(200).end(actionPage('Email verified',
       'Your recovery email is confirmed. Return to the Ikot La Salle app.'));
   } catch (error) {
+    console.error('Recovery email verification failed:', error.message);
     res.writeHead(400).end(actionPage('Could not verify email', escapeHtml(error.message)));
+  }
+  return true;
+}
+
+async function handlePasswordResetPage(req, res, {admin, db, url}) {
+  const invalidPage = (message) => {
+    res.writeHead(400).end(actionPage('Could not reset password', escapeHtml(message)));
+    return true;
+  };
+  if (req.method === 'GET') {
+    const oobCode = url.searchParams.get('oobCode') || '';
+    if (!/^[A-Za-z0-9._~-]{20,512}$/.test(oobCode)) {
+      return invalidPage('This password-reset link is invalid. Request a new one in the app.');
+    }
+    const resetRef = db.collection('recoveryPasswordResetTokens').doc(hashToken(oobCode));
+    const reset = (await resetRef.get()).data();
+    const expiry = reset?.expiresAt?.toMillis?.();
+    if (!reset || !expiry || expiry <= Date.now()) {
+      return invalidPage('This password-reset link is invalid or expired. Request a new one in the app.');
+    }
+    const form = `<p><strong>${escapeHtml(reset.email)}</strong></p><form method="post" action="/reset-password"><input type="hidden" name="oobCode" value="${escapeHtml(oobCode)}"><label>New password<input type="password" name="newPassword" minlength="8" maxlength="128" autocomplete="new-password" required></label><label>Confirm new password<input type="password" name="confirmPassword" minlength="8" maxlength="128" autocomplete="new-password" required></label><button type="submit">Save new password</button></form>`;
+    res.writeHead(200).end(actionPage('Reset your password', 'Password recovery email:', form));
+    return true;
+  }
+  if (req.method !== 'POST') {
+    res.writeHead(405).end(actionPage('Method not allowed', 'Return to the app and request a new reset link.'));
+    return true;
+  }
+  try {
+    const raw = await readBody(req, 4096);
+    const form = new URLSearchParams(raw);
+    const oobCode = form.get('oobCode') || '';
+    const newPassword = form.get('newPassword') || '';
+    const confirmPassword = form.get('confirmPassword') || '';
+    if (!/^[A-Za-z0-9._~-]{20,512}$/.test(oobCode)) {
+      throw new Error('This password-reset link is invalid. Request a new one in the app.');
+    }
+    if (newPassword.length < 8 || newPassword.length > 128) {
+      throw new Error('Use a password between 8 and 128 characters.');
+    }
+    if (!/[A-Z]/.test(newPassword)) throw new Error('Add at least one uppercase letter.');
+    if (!/[^A-Za-z0-9]/.test(newPassword)) throw new Error('Add at least one special character.');
+    if (newPassword !== confirmPassword) throw new Error('The passwords do not match.');
+    const resetRef = db.collection('recoveryPasswordResetTokens').doc(hashToken(oobCode));
+    const reset = (await resetRef.get()).data();
+    const expiry = reset?.expiresAt?.toMillis?.();
+    if (!reset || !expiry || expiry <= Date.now()) {
+      throw new Error('This password-reset link is invalid or expired. Request a new one in the app.');
+    }
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:resetPassword?key=${encodeURIComponent(reset.apiKey)}`,
+      {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({oobCode, newPassword}), signal: AbortSignal.timeout(15000)},
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const code = String(result.error?.message || '');
+      if (code.includes('WEAK_PASSWORD')) throw new Error('Choose a stronger password and try again.');
+      if (code.includes('EXPIRED_OOB_CODE') || code.includes('INVALID_OOB_CODE')) {
+        throw new Error('This password-reset link is invalid or expired. Request a new one in the app.');
+      }
+      throw new Error('Firebase could not reset the password. Request a new link and try again.');
+    }
+    await resetRef.delete();
+    res.writeHead(200).end(actionPage('Password updated',
+      'Your password has been changed. Return to Ikot La Salle and sign in with your passenger ID.'));
+  } catch (error) {
+    console.error('Passenger password reset failed:', error.message);
+    res.writeHead(400).end(actionPage('Could not reset password', escapeHtml(error.message)));
   }
   return true;
 }
@@ -207,5 +304,5 @@ function escapeHtml(value) {
 }
 
 function actionPage(title, message, action = '') {
-  return `<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font:16px system-ui,sans-serif;background:#f4f7f5;color:#1c2922;margin:0;padding:24px}.card{max-width:520px;margin:10vh auto;background:white;padding:28px;border-radius:16px;box-shadow:0 4px 24px #183a2518}button{background:#176b45;color:#fff;border:0;border-radius:10px;padding:14px 20px;font-weight:700;font-size:16px}</style><main class="card"><h1>${escapeHtml(title)}</h1><p>${message}</p>${action}</main></html>`;
+  return `<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font:16px system-ui,sans-serif;background:#f4f7f5;color:#1c2922;margin:0;padding:24px}.card{max-width:520px;margin:10vh auto;background:white;padding:28px;border-radius:16px;box-shadow:0 4px 24px #183a2518}form{display:grid;gap:16px}label{display:grid;gap:7px;color:#59645e}input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #c8d0cb;border-radius:8px;font:inherit;color:#1c2922}button{background:#176b45;color:#fff;border:0;border-radius:10px;padding:14px 20px;font-weight:700;font-size:16px;cursor:pointer}</style><main class="card"><h1>${escapeHtml(title)}</h1><p>${message}</p>${action}</main></html>`;
 }

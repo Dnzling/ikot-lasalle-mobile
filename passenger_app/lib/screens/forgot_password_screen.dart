@@ -71,12 +71,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Enter the recovery email you verified in your passenger profile. Your sign-in remains your passenger ID.',
+              'Enter the recovery email you already verified in Profile. This sends a password-reset link. If you have not verified a recovery email yet, sign in and set one in Profile first. You will continue signing in with your passenger ID.',
             ),
             const SizedBox(height: 24),
             _field(
               _email,
-              'Email address',
+              'Verified recovery email',
               keyboardType: TextInputType.emailAddress,
             ),
             const SizedBox(height: 12),
