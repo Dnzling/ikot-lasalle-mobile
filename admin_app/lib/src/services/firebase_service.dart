@@ -34,10 +34,7 @@ class FirebaseService {
   Stream<User?> get authChanges => auth.authStateChanges();
 
   Future<bool> canCreateInitialAdmin() async {
-    final bootstrap = await db
-        .collection('system')
-        .doc('adminBootstrap')
-        .get();
+    final bootstrap = await db.collection('system').doc('adminBootstrap').get();
     return !bootstrap.exists;
   }
 
@@ -73,7 +70,9 @@ class FirebaseService {
       await db.runTransaction((transaction) async {
         final bootstrap = await transaction.get(bootstrapRef);
         if (bootstrap.exists) {
-          throw StateError('The initial admin account has already been created.');
+          throw StateError(
+            'The initial admin account has already been created.',
+          );
         }
 
         final now = FieldValue.serverTimestamp();
@@ -122,7 +121,10 @@ class FirebaseService {
       );
     }
     await auth.signInWithEmailAndPassword(email: email, password: password);
-    final profile = await db.collection('users').doc(auth.currentUser!.uid).get();
+    final profile = await db
+        .collection('users')
+        .doc(auth.currentUser!.uid)
+        .get();
     final data = profile.data();
     if (data == null ||
         '${data['userType'] ?? ''}'.toLowerCase() != 'admin' ||
@@ -158,10 +160,12 @@ class FirebaseService {
     String documentId,
   ) => db.collection(collection).doc(documentId).snapshots();
 
-  Future<({double registration, double minimumTopUp})> getCreditSettings() async {
-    final snapshot = await db.collection('settings').doc('credits').get(
-      const GetOptions(source: Source.server),
-    );
+  Future<({double registration, double minimumTopUp})>
+  getCreditSettings() async {
+    final snapshot = await db
+        .collection('settings')
+        .doc('credits')
+        .get(const GetOptions(source: Source.server));
     final data = snapshot.data();
     return (
       registration: (data?['registrationCredits'] as num?)?.toDouble() ?? 100,
@@ -174,10 +178,14 @@ class FirebaseService {
     required double minimumTopUp,
   }) async {
     bool valid(double value, {bool zeroAllowed = false}) =>
-        value.isFinite && value >= (zeroAllowed ? 0 : 0.01) &&
-        value <= 10000 && (value * 100 - (value * 100).round()).abs() < 0.000001;
+        value.isFinite &&
+        value >= (zeroAllowed ? 0 : 0.01) &&
+        value <= 10000 &&
+        (value * 100 - (value * 100).round()).abs() < 0.000001;
     if (!valid(registration, zeroAllowed: true) || !valid(minimumTopUp)) {
-      throw ArgumentError('Enter valid credit amounts up to 10,000 with at most two decimals.');
+      throw ArgumentError(
+        'Enter valid credit amounts up to 10,000 with at most two decimals.',
+      );
     }
     await db.collection('settings').doc('credits').set({
       'registrationCredits': registration,
@@ -187,7 +195,23 @@ class FirebaseService {
     }, SetOptions(merge: true));
     await logAdminActivity(
       action: 'Updated credit settings',
-      details: 'Registration: ${registration.toStringAsFixed(2)} credits; minimum top-up: ${minimumTopUp.toStringAsFixed(2)} credits.',
+      details:
+          'Registration: ${registration.toStringAsFixed(2)} credits; minimum top-up: ${minimumTopUp.toStringAsFixed(2)} credits.',
+    );
+  }
+
+  Future<void> updateOverstayPenalty(int credits) async {
+    if (credits < 1 || credits > 10000) {
+      throw ArgumentError('Overstaying penalty must be between 1 and 10,000 credits.');
+    }
+    await db.collection('settings').doc('credits').set({
+      'overstayingPenaltyCredits': credits,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': auth.currentUser?.uid,
+    }, SetOptions(merge: true));
+    await logAdminActivity(
+      action: 'Updated overstaying penalty',
+      details: 'Overstaying deducts $credits credits.',
     );
   }
 
@@ -359,8 +383,12 @@ class FirebaseService {
     var changed = 0;
     final uniqueIds = ids.toSet().toList();
     for (var offset = 0; offset < uniqueIds.length; offset += 200) {
-      final snapshots = await Future.wait(uniqueIds.skip(offset).take(200)
-          .map((id) => db.collection('users').doc(id).get()));
+      final snapshots = await Future.wait(
+        uniqueIds
+            .skip(offset)
+            .take(200)
+            .map((id) => db.collection('users').doc(id).get()),
+      );
       final batch = db.batch();
       final changedIds = <String>[];
       for (final snapshot in snapshots) {
@@ -374,12 +402,16 @@ class FirebaseService {
           'updatedAt': FieldValue.serverTimestamp(),
         });
         final session = data['session'];
-        if (session is Map && session['id'] is String &&
+        if (session is Map &&
+            session['id'] is String &&
             (session['id'] as String).isNotEmpty) {
-          batch.set(snapshot.reference.collection('sessions').doc(session['id'] as String), {
-            'active': false,
-            'endReason': 'archived',
-          }, SetOptions(merge: true));
+          batch.set(
+            snapshot.reference
+                .collection('sessions')
+                .doc(session['id'] as String),
+            {'active': false, 'endReason': 'archived'},
+            SetOptions(merge: true),
+          );
         }
         changedIds.add(snapshot.id);
       }
@@ -388,7 +420,8 @@ class FirebaseService {
       changed += changedIds.length;
       await logAdminActivity(
         action: 'Archived passenger accounts',
-        details: '${changedIds.length} account(s); IDs: ${changedIds.join(', ')}.',
+        details:
+            '${changedIds.length} account(s); IDs: ${changedIds.join(', ')}.',
       );
     }
     return changed;
@@ -812,30 +845,44 @@ class FirebaseService {
       .orderBy('submittedAt', descending: true)
       .snapshots();
 
-  Future<String> manualTopUp({required String userId, required double amount}) async {
-    if (!amount.isFinite || amount < 0.01 || amount > 10000 ||
+  Future<String> manualTopUp({
+    required String userId,
+    required double amount,
+  }) async {
+    if (!amount.isFinite ||
+        amount < 0.01 ||
+        amount > 10000 ||
         (amount * 100 - (amount * 100).round()).abs() > 0.000001) {
       throw ArgumentError('Enter an amount between 0.01 and 10,000 credits.');
     }
     final userRef = db.collection('users').doc(userId);
     final settingsRef = db.collection('settings').doc('credits');
     final requestRef = db.collection('topUpRequests').doc();
-    final reference = 'MT-${DateTime.now().toUtc().millisecondsSinceEpoch}-${requestRef.id.substring(0, 6).toUpperCase()}';
+    final reference =
+        'MT-${DateTime.now().toUtc().millisecondsSinceEpoch}-${requestRef.id.substring(0, 6).toUpperCase()}';
     final stamp = FieldValue.serverTimestamp();
     await db.runTransaction((transaction) async {
       final snapshot = await transaction.get(userRef);
       final settingsSnapshot = await transaction.get(settingsRef);
-      final minimum = (settingsSnapshot.data()?['minimumTopUpCredits'] as num?)?.toDouble() ?? 1;
+      final minimum =
+          (settingsSnapshot.data()?['minimumTopUpCredits'] as num?)
+              ?.toDouble() ??
+          1;
       if (amount < minimum) {
-        throw ArgumentError('Minimum top-up is ${minimum.toStringAsFixed(2)} credits.');
+        throw ArgumentError(
+          'Minimum top-up is ${minimum.toStringAsFixed(2)} credits.',
+        );
       }
       final user = snapshot.data();
-      if (user == null || user['active'] == false || user['archived'] == true ||
+      if (user == null ||
+          user['active'] == false ||
+          user['archived'] == true ||
           '${user['userType'] ?? ''}'.toLowerCase() == 'admin') {
         throw StateError('Select an active passenger account.');
       }
       final balance = (user['balance'] as num?)?.toDouble() ?? 0;
-      final name = '${user['firstName'] ?? ''} ${user['lastName'] ?? ''}'.trim();
+      final name = '${user['firstName'] ?? ''} ${user['lastName'] ?? ''}'
+          .trim();
       transaction.update(userRef, {'balance': balance + amount});
       transaction.set(requestRef, {
         'userId': userId,
@@ -850,28 +897,33 @@ class FirebaseService {
         'creditedAt': stamp,
         'reviewedBy': auth.currentUser?.uid,
       });
-      transaction.set(db.collection('transactions').doc('manualTopUp_${requestRef.id}'), {
-        'userId': userId,
-        'passengerName': name,
-        'passengerId': '${user['idNumber'] ?? ''}',
-        'type': 'topUp',
-        'title': 'Manual top-up',
-        'description': 'Admin manual top-up',
-        'amount': amount,
-        'referenceNumber': reference,
-        'topUpRequestId': requestRef.id,
-        'createdAt': stamp,
-      });
+      transaction.set(
+        db.collection('transactions').doc('manualTopUp_${requestRef.id}'),
+        {
+          'userId': userId,
+          'passengerName': name,
+          'passengerId': '${user['idNumber'] ?? ''}',
+          'type': 'topUp',
+          'title': 'Manual top-up',
+          'description': 'Admin manual top-up',
+          'amount': amount,
+          'referenceNumber': reference,
+          'topUpRequestId': requestRef.id,
+          'createdAt': stamp,
+        },
+      );
       transaction.set(db.collection('notifications').doc(), {
         'userId': userId,
         'type': 'topUp',
         'title': 'Manual top-up credited',
-        'message': 'PHP ${amount.toStringAsFixed(2)} was added to your credits. Reference: $reference.',
+        'message':
+            'PHP ${amount.toStringAsFixed(2)} was added to your credits. Reference: $reference.',
         'createdAt': stamp,
       });
       transaction.set(db.collection('adminAuditLogs').doc(), {
         'action': 'Manual top-up',
-        'details': 'User ID: $userId; amount: PHP ${amount.toStringAsFixed(2)}; reference: $reference.',
+        'details':
+            'User ID: $userId; amount: PHP ${amount.toStringAsFixed(2)}; reference: $reference.',
         'adminId': auth.currentUser?.uid,
         'createdAt': stamp,
       });
@@ -1099,16 +1151,18 @@ class FirebaseService {
         'uid': credential.user!.uid,
         'email': authEmail.toLowerCase(),
       });
-      if (registrationCredits > 0) batch.set(db.collection('transactions').doc(), {
-        'userId': credential.user!.uid,
-        'passengerName': '${data['firstName'] ?? ''} ${data['lastName'] ?? ''}'.trim(),
-        'passengerId': idNumber,
-        'type': 'initialCredit',
-        'title': 'Welcome credits',
-        'description': 'Initial account credits',
-        'amount': registrationCredits,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+      if (registrationCredits > 0)
+        batch.set(db.collection('transactions').doc(), {
+          'userId': credential.user!.uid,
+          'passengerName':
+              '${data['firstName'] ?? ''} ${data['lastName'] ?? ''}'.trim(),
+          'passengerId': idNumber,
+          'type': 'initialCredit',
+          'title': 'Welcome credits',
+          'description': 'Initial account credits',
+          'amount': registrationCredits,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
       await batch.commit();
       await secondaryAuth.signOut();
     } finally {
@@ -1264,6 +1318,19 @@ class FirebaseService {
     await logAdminActivity(
       action: 'Archived route',
       details: 'Route ID: $routeId.',
+    );
+  }
+
+  Future<void> removeRouteFromDisplay(String routeId) async {
+    await db.collection('routes').doc(routeId).update({
+      'removed': true,
+      'active': false,
+      'removedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await logAdminActivity(
+      action: 'Removed route from display',
+      details: 'Route ID: $routeId. Record retained in Firestore.',
     );
   }
 

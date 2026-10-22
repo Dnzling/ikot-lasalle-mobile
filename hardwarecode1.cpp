@@ -28,14 +28,14 @@ struct GpsCacheRecord;
 const char* SIM_APN = "internet";  // Smart
 // Installed Smart SIM: 09477589845. The number is for device identification;
 // the modem reads the actual subscriber identity from its inserted SIM.
-const char* RELAY_HOST = "77dab05d41e8f4.lhr.life";
+// The SIM808 has successfully uploaded over plain HTTP through this tunnel.
+const char* RELAY_HOST = "corset-coveting-thigh.ngrok-free.dev";
 const uint16_t RELAY_PORT = 80;
-const char* RELAY_KEY_HEX = "825ea26ec6cc8f5294d1a2a3e5edbce61a2f5cb05da133d001a81de0cfc92b3711afa10eed313562df695b9f0be132cdb788a76fc9750c72df1ac2f008931bed";
+const bool RELAY_USE_TLS = false;
+const char* RELAY_KEY_HEX = "92b483d06e3c9fab06730dc0c514048b3f82b32adeb9a6a6dd82e9475ff9bdf2d75ceff710f0f0b59b11ac569273e8440a5386aa057b65d5af667ffe2e45a760";
 // Copy the document ID (not the vehicle name) from Firestore > vehicles.
-const char* VEHICLE_DOCUMENT_ID = "CuoxcUom2JLXRq4qu33L";
+const char* VEHICLE_DOCUMENT_ID = "Cbzm9w8vC3A5Dp22NeT1";
 const char* VEHICLE_TYPE = "Jeep";
-
-
 
 
 // =====================================================
@@ -567,8 +567,10 @@ const unsigned long ROUTE_RETRY_INTERVAL = 30000;
 const unsigned long FUELING_SYNC_INTERVAL = 300000;
 const unsigned long FUELING_RETRY_INTERVAL = 30000;
 const unsigned long GPS_UPLOAD_INTERVAL = 10000;
+// Temporary fast retry cadence for verifying relay writes during live setup.
+const unsigned long GPS_UPLOAD_RETRY_INITIAL = 5000;
+const unsigned long GPS_UPLOAD_RETRY_MAX = 5000;
 const unsigned long GPS_RESTART_DELAY = 2000;
-const unsigned long LCD_PAGE_INTERVAL = 5000;
 const unsigned long SIM_RETRY_INTERVAL = 15000;
 
 
@@ -578,18 +580,14 @@ unsigned long lastGPSRequest = 0;
 unsigned long lastVehicleSync = 0;
 unsigned long lastRouteSync = 0;
 unsigned long lastFuelingSync = 0;
-unsigned long lastGPSUpload = 0;
 unsigned long lastSuccessfulGpsUpload = 0;
-unsigned long lastLCDPageSwitch = 0;
 unsigned long lastSIMRetry = 0;
 unsigned long lastCellularRetry = 0;
+unsigned long nextGPSUploadAttempt = 0;
+unsigned long gpsUploadRetryDelay = GPS_UPLOAD_RETRY_INITIAL;
+uint8_t gpsUploadFailureCount = 0;
 bool relayHttpActionPending = false;
 unsigned long relayHttpActionStarted = 0;
-
-
-uint8_t lcdPage = 0;
-
-
 
 
 // =====================================================
@@ -626,9 +624,10 @@ void lcdLine(uint8_t row, String text) {
 
 void displayWelcomeScreen() {
   lcd.clear();
-  lcdLine(0, "HELLO DAY");
-  lcdLine(1, "WELCOME TO");
-  lcdLine(2, "IKOT LASALLE");
+  lcdLine(0, "WELCOME TO IKOT");
+  lcdLine(1, "LA SALLE");
+  lcdLine(2, "TYPE: " + String(VEHICLE_TYPE));
+  lcdLine(3, "");
   delay(3000);
 }
 
@@ -636,10 +635,13 @@ void displayWelcomeScreen() {
 
 
 void displayJeepInformation() {
-  lcdLine(0, "TYPE: " + dbVehicleType);
-  lcdLine(1, vehicleDataLoaded ? "ONBOARD: " + String(onboardCount) : "ONBOARD: --");
-  lcdLine(2, vehicleDataLoaded ? "EXPECTED OFF: " + String(expectedOffboardingCount) : "EXPECTED OFF: --");
-  lcdLine(3, dbVehicleStatus.length() ? "STATUS: " + dbVehicleStatus : "STATUS: --");
+  const String type = dbVehicleType.length() && dbVehicleType != "--"
+      ? dbVehicleType : String(VEHICLE_TYPE);
+  const String status = dbVehicleStatus.length() ? dbVehicleStatus : vehicleStatus;
+  lcdLine(0, "TYPE: " + type);
+  lcdLine(1, "STATUS: " + status);
+  lcdLine(2, vehicleDataLoaded ? "ONBOARD: " + String(onboardCount) : "ONBOARD: --");
+  lcdLine(3, vehicleDataLoaded ? "EXPECTED OFF: " + String(expectedOffboardingCount) : "EXPECTED OFF: --");
 }
 
 
@@ -648,9 +650,16 @@ void displayJeepInformation() {
 const char* cloudStatusText() {
   switch (cloudStatus) {
     case CloudStatus::connected: return "CONNECTED";
-    case CloudStatus::uploadFailed: return "PENDING";
-    default: return "CONNECTING...";
+    case CloudStatus::uploadFailed: return "UPLOAD FAILED";
+    default: return "CONNECTING";
   }
+}
+
+void displayRelayStatus() {
+  lcdLine(0, "RELAY STATUS");
+  lcdLine(1, cloudStatusText());
+  lcdLine(2, cellularDataReady ? "GPRS: READY" : "GPRS: OFFLINE");
+  lcdLine(3, gpsHasFix ? "GPS: FIX" : "GPS: NO FIX");
 }
 
 
@@ -688,6 +697,8 @@ void drawCurrentLCDPage();
 void setCloudStatus(CloudStatus nextStatus) {
   if (cloudStatus == nextStatus) return;
   cloudStatus = nextStatus;
+  Serial.print("Relay status: ");
+  Serial.println(cloudStatusText());
   drawCurrentLCDPage();
 }
 
@@ -695,27 +706,7 @@ void setCloudStatus(CloudStatus nextStatus) {
 
 
 void drawCurrentLCDPage() {
-  switch (lcdPage) {
-    case 0: displayGPSLocation(); break;
-    case 1: displayGPSSummary(); break;
-    default: displayJeepInformation(); break;
-  }
-}
-
-
-
-
-void updateLCDPages() {
-  if (millis() - lastLCDPageSwitch >= LCD_PAGE_INTERVAL) {
-    lastLCDPageSwitch = millis();
-    lcdPage = (lcdPage + 1) % 3;
-    const char* pageNames[] = {
-      "GPS details", "GPS summary", "onboard/outboard"
-    };
-    Serial.print("LCD page: ");
-    Serial.println(pageNames[lcdPage]);
-    drawCurrentLCDPage();
-  }
+  displayJeepInformation();
 }
 
 
@@ -836,6 +827,85 @@ bool connectCellularData() {
   cellularDataReady = bearer.indexOf("+SAPBR: 1,1") >= 0;
   Serial.println(cellularDataReady ? "SIM808 GPRS ready" : "SIM808 GPRS bearer unavailable");
   return cellularDataReady;
+}
+
+void diagnoseRelayDns() {
+  sendATCommand("AT+CDNSCFG?", 3000);
+  const String capability = sendATCommand("AT+CDNSGIP=?", 3000);
+  if (capability.indexOf("OK") < 0) {
+    Serial.println("SIM808 rejected the CDNSGIP capability query; standalone DNS diagnostics are unavailable on this modem state/firmware");
+    return;
+  }
+
+  const auto queryDns = [](const String& command) {
+    clearSIMBuffer();
+    Serial.print(">> ");
+    Serial.println(command);
+    sim808.println(command);
+
+    String response;
+    response.reserve(300);
+    const unsigned long started = millis();
+    bool dnsResultReceived = false;
+    while (millis() - started < 20000) {
+      while (sim808.available()) {
+        const char character = static_cast<char>(sim808.read());
+        if (response.length() < 500) response += character;
+        const int resultMarker = response.indexOf("+CDNSGIP:");
+        if (resultMarker >= 0 && response.indexOf('\n', resultMarker) >= 0) {
+          dnsResultReceived = true;
+          break;
+        }
+        if (response.indexOf("CME ERROR") >= 0 ||
+            response.indexOf("ERROR") >= 0) break;
+      }
+      if (dnsResultReceived || response.indexOf("CME ERROR") >= 0 ||
+          response.indexOf("ERROR") >= 0) break;
+      yield();
+    }
+    Serial.println("<< DNS diagnostic");
+    if (response.isEmpty()) Serial.println("[NO RESPONSE]");
+    else Serial.println(response);
+    if (response.indexOf("CME ERROR") >= 0 || response.indexOf("ERROR") >= 0) {
+      Serial.println("SIM808 rejected the standalone DNS lookup command; this is separate from the HTTP client's 603 result");
+    } else if (!dnsResultReceived) {
+      Serial.println("SIM808 accepted the DNS query but returned no result within 20 seconds");
+    }
+    return response;
+  };
+
+  String response = queryDns(String("AT+CDNSGIP=\"") + RELAY_HOST + "\"");
+  // Some SIM808 firmware builds accept the domain as an unquoted parameter.
+  if (response.indexOf("CME ERROR") >= 0 || response.indexOf("ERROR") >= 0) {
+    Serial.println("Retrying CDNSGIP with the unquoted domain syntax");
+    response = queryDns(String("AT+CDNSGIP=") + RELAY_HOST);
+  }
+  if (response.indexOf("+CDNSGIP: 1,") >= 0) {
+    Serial.println("Relay DNS resolved successfully");
+  } else if (response.indexOf("+CDNSGIP: 0,") >= 0) {
+    Serial.println("Relay DNS lookup failed; inspect the modem DNS error code above");
+  }
+}
+
+void diagnoseRelayConnection(const String& reason, bool includeDns) {
+  Serial.println("SIM808 relay diagnostics after: " + reason);
+  const String signal = sendATCommand("AT+CSQ", 3000);
+  const int signalMarker = signal.indexOf("+CSQ:");
+  if (signalMarker >= 0) {
+    const int valueStart = signal.indexOf(':', signalMarker) + 1;
+    const int comma = signal.indexOf(',', valueStart);
+    const int rssi = comma > valueStart
+        ? signal.substring(valueStart, comma).toInt() : 99;
+    if (rssi == 99) Serial.println("Radio signal strength: unknown");
+    else Serial.printf("Radio signal: CSQ %d (~%d dBm)\n", rssi, -113 + 2 * rssi);
+  }
+  sendATCommand("AT+CGMR", 5000);
+  sendATCommand("AT+CREG?", 3000);
+  sendATCommand("AT+CGATT?", 3000);
+  const String bearer = sendATCommand("AT+SAPBR=2,1", 3000);
+  if (!includeDns) return;
+  if (bearer.indexOf("+SAPBR: 1,1") >= 0) diagnoseRelayDns();
+  else Serial.println("Skipping DNS lookup: GPRS bearer is not open");
 }
 
 void maintainCellularData() {
@@ -1251,7 +1321,7 @@ void updateCurrentStop() {
       if (routeMovingTowardLastStop != towardLast) {
         routeMovingTowardLastStop = towardLast;
         saveRouteDirection();
-        lastGPSUpload = millis() - GPS_UPLOAD_INTERVAL;
+        nextGPSUploadAttempt = millis();
       }
     }
     if (routeStops[nearest].id == "gate_1" ||
@@ -1718,13 +1788,25 @@ bool openRelayMessage(const String& envelope, const String& requestNonce,
 }
 
 bool relayHttpPost(const String& payload, String& response) {
+  bool diagnoseDnsAfterFailure = false;
+  bool reconnectBearerAfterFailure = false;
+  String failureReason;
   if (relayHttpActionPending) {
-    if (millis() - relayHttpActionStarted < 120000) return false;
+    if (millis() - relayHttpActionStarted < 120000) {
+      Serial.println("Previous SIM808 HTTP action is still pending; waiting before retry");
+      return false;
+    }
     // An earlier request never reported completion. Give it time before cleanup.
     sendATCommand("AT+HTTPTERM", 3000);
     relayHttpActionPending = false;
   }
-  if (!cellularDataReady && !connectCellularData()) return false;
+  if (!cellularDataReady && !connectCellularData()) {
+    failureReason = "GPRS bearer unavailable";
+  }
+  if (!failureReason.isEmpty()) {
+    diagnoseRelayConnection(failureReason, true);
+    return false;
+  }
   String initResponse = sendATCommand("AT+HTTPINIT", 3000);
   if (initResponse.indexOf("OK") < 0) {
     // The ESP8266 can restart while the SIM808 still has an HTTP session open.
@@ -1749,11 +1831,32 @@ bool relayHttpPost(const String& payload, String& response) {
   }
   bool okay = false;
   do {
-    if (sendATCommand("AT+HTTPPARA=\"CID\",1", 3000).indexOf("OK") < 0) break;
+    if (sendATCommand("AT+HTTPPARA=\"CID\",1", 3000).indexOf("OK") < 0) {
+      failureReason = "Could not bind HTTP service to GPRS bearer CID 1";
+      break;
+    }
     const String url = String("http://") + RELAY_HOST + ":" + RELAY_PORT + "/relay";
-    if (sendATCommand(String("AT+HTTPPARA=\"URL\",\"") + url + "\"", 3000).indexOf("OK") < 0) break;
-    if (sendATCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 3000).indexOf("OK") < 0) break;
-    if (sendATCommand(String("AT+HTTPDATA=") + payload.length() + ",10000", 3000).indexOf("DOWNLOAD") < 0) break;
+    if (sendATCommand(String("AT+HTTPPARA=\"URL\",\"") + url + "\"", 3000).indexOf("OK") < 0) {
+      failureReason = "SIM808 rejected the relay URL";
+      break;
+    }
+    if (sendATCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 3000).indexOf("OK") < 0) {
+      failureReason = "SIM808 rejected the JSON content type";
+      break;
+    }
+    // Relay payload remains AES-encrypted and HMAC-authenticated end-to-end.
+    if (sendATCommand(String("AT+HTTPSSL=") + (RELAY_USE_TLS ? "1" : "0"), 3000).indexOf("OK") < 0) {
+      failureReason = "SIM808 could not set the relay transport TLS mode";
+      break;
+    }
+    if (RELAY_USE_TLS && sendATCommand("AT+SSLOPT=0,1", 3000).indexOf("OK") < 0) {
+      failureReason = "SIM808 firmware rejected AT+SSLOPT=0,1";
+      break;
+    }
+    if (sendATCommand(String("AT+HTTPDATA=") + payload.length() + ",10000", 3000).indexOf("DOWNLOAD") < 0) {
+      failureReason = "SIM808 did not enter HTTPDATA download mode";
+      break;
+    }
     sim808.print(payload);
     String accepted;
     const unsigned long dataStarted = millis();
@@ -1762,7 +1865,10 @@ bool relayHttpPost(const String& payload, String& response) {
       if (accepted.length() > 100) break;
       yield();
     }
-    if (accepted.indexOf("OK") < 0) break;
+    if (accepted.indexOf("OK") < 0) {
+      failureReason = "SIM808 did not accept the complete encrypted payload";
+      break;
+    }
     clearSIMBuffer();
     sim808.println("AT+HTTPACTION=1");
     relayHttpActionPending = true;
@@ -1777,25 +1883,63 @@ bool relayHttpPost(const String& payload, String& response) {
     }
     const int actionMarker = action.indexOf("+HTTPACTION:");
     if (actionMarker < 0 || action.indexOf('\n', actionMarker) < 0) {
-      Serial.println("SIM808 HTTP action still pending; leaving session open");
+      Serial.println("SIM808 HTTP action timed out; leaving session open for safe recovery");
       return false;
     }
     relayHttpActionPending = false;
-    if (action.indexOf("+HTTPACTION: 1,200,") < 0) {
-      Serial.println("SIM808 relay HTTP request failed: " + action);
-      cellularDataReady = false;
+    Serial.println("SIM808 HTTP action result: " + action);
+    const int firstComma = action.indexOf(',', actionMarker);
+    const int secondComma = firstComma < 0 ? -1 : action.indexOf(',', firstComma + 1);
+    int httpStatus = -1;
+    if (firstComma >= 0 && secondComma > firstComma) {
+      httpStatus = action.substring(firstComma + 1, secondComma).toInt();
+    }
+    if (httpStatus != 200) {
+      if (httpStatus == 603) {
+        failureReason = "SIM808 returned 603 (DNS Error) for the relay host";
+        diagnoseDnsAfterFailure = true;
+        reconnectBearerAfterFailure = true;
+      } else if (httpStatus >= 600) {
+        failureReason = String("SIM808 transport error ") + httpStatus;
+        reconnectBearerAfterFailure = (httpStatus == 601 || httpStatus == 604);
+      } else if (httpStatus >= 0) {
+        failureReason = String("Relay HTTP server returned status ") + httpStatus;
+      } else {
+        failureReason = "Could not parse SIM808 HTTPACTION response";
+      }
+      Serial.println("Relay upload failed: " + failureReason);
       break;
     }
     const String raw = sendATCommand("AT+HTTPREAD", 30000);
     const int marker = raw.indexOf("+HTTPREAD:");
     const int bodyStart = marker < 0 ? -1 : raw.indexOf('\n', marker) + 1;
     const int bodyEnd = raw.lastIndexOf("\r\nOK");
-    if (bodyStart <= 0 || bodyEnd <= bodyStart) break;
+    if (bodyStart <= 0 || bodyEnd <= bodyStart) {
+      failureReason = "Relay returned HTTP 200 but SIM808 could not read the response body";
+      break;
+    }
     response = raw.substring(bodyStart, bodyEnd);
     response.trim();
-    okay = true;
+    if (!response.isEmpty()) okay = true;
+    else {
+      failureReason = "Relay returned HTTP 200 with an empty response body";
+    }
   } while (false);
   sendATCommand("AT+HTTPTERM", 3000);
+  if (!okay && !failureReason.isEmpty()) {
+    diagnoseRelayConnection(failureReason, diagnoseDnsAfterFailure);
+  }
+  if (reconnectBearerAfterFailure) {
+    Serial.println("Reconnecting SIM808 GPRS bearer once before the scheduled retry");
+    const String closeResponse = sendATCommand("AT+SAPBR=0,1", 12000);
+    if (closeResponse.indexOf("OK") < 0) {
+      Serial.println("Bearer close was not accepted; querying its state and attempting normal bearer recovery");
+    }
+    cellularDataReady = false;
+    delay(1000);
+    if (!connectCellularData()) Serial.println("GPRS bearer reconnection failed; next retry is delayed");
+  }
+  if (!okay && !failureReason.isEmpty()) Serial.println("SIM808 relay transport detail: " + failureReason);
   return okay;
 }
 
@@ -1813,10 +1957,16 @@ bool relayRequest(JsonDocument& request, JsonDocument& response) {
   String plain;
   serializeJson(request, plain);
   String envelope, nonce, reply;
-  if (!sealRelayMessage(plain, envelope, nonce) ||
-      !relayHttpPost(envelope, reply) ||
-      !openRelayMessage(reply, nonce, response)) {
-    Serial.println("Encrypted relay request failed");
+  if (!sealRelayMessage(plain, envelope, nonce)) {
+    Serial.println("Relay request failed: could not encrypt and authenticate the request");
+    return false;
+  }
+  if (!relayHttpPost(envelope, reply)) {
+    Serial.println("Relay request failed: no complete HTTP response was received");
+    return false;
+  }
+  if (!openRelayMessage(reply, nonce, response)) {
+    Serial.println("Relay response rejected: invalid signature, nonce, JSON, or success acknowledgement");
     return false;
   }
   return true;
@@ -1908,8 +2058,27 @@ void syncVehicleDataRelay() {
   drawCurrentLCDPage();
 }
 
+void scheduleNextGpsUpload(bool successful) {
+  const unsigned long now = millis();
+  if (successful) {
+    gpsUploadFailureCount = 0;
+    gpsUploadRetryDelay = GPS_UPLOAD_RETRY_INITIAL;
+    nextGPSUploadAttempt = now + GPS_UPLOAD_INTERVAL;
+    Serial.println("Next GPS upload scheduled in 10 seconds");
+    return;
+  }
+
+  if (gpsUploadFailureCount < 10) ++gpsUploadFailureCount;
+  gpsUploadRetryDelay = GPS_UPLOAD_RETRY_INITIAL;
+  nextGPSUploadAttempt = now + gpsUploadRetryDelay;
+  Serial.printf("GPS upload retry %u scheduled in %lu seconds\n",
+                gpsUploadFailureCount, gpsUploadRetryDelay / 1000);
+}
+
 void uploadVehicleLocationRelay() {
   if (!gpsHasFix) return;
+  setCloudStatus(CloudStatus::connecting);
+  Serial.println("CONNECTING: sending GPS update to the relay");
   JsonDocument request, response;
   request["op"] = "gps";
   request["latitude"] = gpsLatitude;
@@ -1927,11 +2096,15 @@ void uploadVehicleLocationRelay() {
                       vehicleStatus == "BREAK" ? "break" : "active";
   if (!relayRequest(request, response)) {
     setCloudStatus(CloudStatus::uploadFailed);
+    scheduleNextGpsUpload(false);
     return;
   }
+  // relayRequest returns true only after validating the encrypted response's
+  // HMAC, request nonce, JSON, and {"ok":true} acknowledgement.
   lastSuccessfulGpsUpload = millis();
   setCloudStatus(CloudStatus::connected);
-  Serial.println("Vehicle GPS uploaded through SIM808 relay");
+  Serial.println("CONNECTED: relay authenticated and acknowledged the GPS update");
+  scheduleNextGpsUpload(true);
 }
 
 
@@ -1969,7 +2142,7 @@ void setup() {
 
 
   displayWelcomeScreen();
-  displayGPSLocation();
+  displayJeepInformation();
 
 
 
@@ -2022,7 +2195,6 @@ void setup() {
     updateCurrentStop();
     if (gpsHasFix) updateGpsDisplaySnapshot();
     uploadVehicleLocationRelay();
-    lastGPSUpload = millis();
   }
 
 
@@ -2034,8 +2206,6 @@ void setup() {
 
 
   lastGPSRequest = millis();
-  lastLCDPageSwitch = millis();
-  lcdPage = 0;
   drawCurrentLCDPage();
 }
 
@@ -2052,7 +2222,6 @@ void loop() {
     setCloudStatus(CloudStatus::uploadFailed);
   }
   retrySIM808();
-  updateLCDPages();
   if (sim808Available &&
       millis() - lastGPSRequest >=
       GPS_REQUEST_INTERVAL) {
@@ -2070,8 +2239,8 @@ void loop() {
 
 
 
-  if (gpsHasFix && millis() - lastGPSUpload >= GPS_UPLOAD_INTERVAL) {
-    lastGPSUpload = millis();
+  if (gpsHasFix && (nextGPSUploadAttempt == 0 ||
+      static_cast<int32_t>(millis() - nextGPSUploadAttempt) >= 0)) {
     uploadVehicleLocationRelay();
   }
 
@@ -2105,6 +2274,5 @@ void loop() {
   }
 
 
-  updateLCDPages();
   yield();
 }

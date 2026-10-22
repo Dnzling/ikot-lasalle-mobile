@@ -44,13 +44,65 @@ HTTPS/TLS support has been implemented and verified on the actual modem.
 
 ## Trusted passenger operations
 
-The same server now accepts Firebase-authenticated HTTPS requests at
+The same server accepts Firebase-authenticated HTTPS requests at
 `/api/board` and `/api/arrive`. It verifies the passenger's Firebase ID token,
 recalculates the fare from Firestore, and commits balance, trip, vehicle, and
 ledger changes in one transaction. Publish it behind a stable HTTPS address.
 The passenger app must be built with
 `--dart-define=TRUSTED_API_BASE_URL=https://YOUR_HOST`.
 Do not put `RELAY_KEY_HEX` or the service-account JSON in a Flutter app.
+
+## Passenger recovery email (Brevo)
+
+The passenger app keeps Firebase Auth's internal email unchanged and continues
+to sign in by passenger ID. It calls the relay's authenticated
+`/api/recovery/start-verification` endpoint to send a one-time recovery-email
+verification link. The relay records the pending request with Admin SDK, then
+marks `recoveryEmail` verified only after the link is confirmed. Forgot Password
+calls the public `/api/recovery/request-reset` endpoint; it generates a Firebase
+password-reset action link for the passenger's existing Auth account and sends
+that link to the verified recovery email through Brevo.
+
+Configure these Render environment variables on the relay service:
+
+- `BREVO_API_KEY`: Brevo transactional email API key (secret; never commit it).
+- `BREVO_SENDER_EMAIL`: sender address verified in Brevo.
+- `BREVO_SENDER_NAME`: optional sender display name (defaults to `Ikot La Salle`).
+- `APP_PUBLIC_URL`: public HTTPS origin of this relay, for example
+  `https://ikot-lasalle-mobile.onrender.com`.
+
+Without the Brevo key and a verified sender address, recovery emails are not
+delivered. The Firestore client rules do not grant clients write access to
+recovery email fields; the relay uses its Firebase Admin credential for those
+updates.
+
+### Local demo through ngrok
+
+Use this when the relay runs on your PC instead of Render. In Brevo, use the
+**API keys & MCP** tab to create an API key; the SMTP login and SMTP key are not
+used by this relay. In Brevo, also verify the sender email address.
+
+1. Add `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`, and
+   `APP_PUBLIC_URL` to `hardware_relay/.env`. Set `APP_PUBLIC_URL` to the
+   current tunnel's HTTPS URL, such as
+   `https://YOUR-NGROK-DOMAIN.ngrok-free.dev` (no trailing path).
+2. In one terminal, start the relay from `hardware_relay` with `pnpm start`.
+3. In another terminal, start the tunnel with
+   `ngrok http 8080`. Confirm that `https://YOUR-NGROK-DOMAIN.ngrok-free.dev/health`
+   returns `{"ok":true}`.
+4. Run the passenger app with the same tunnel origin:
+
+   ```powershell
+   cd ..\passenger_app
+   flutter run --dart-define=TRUSTED_API_BASE_URL=https://YOUR-NGROK-DOMAIN.ngrok-free.dev
+   ```
+
+Keep the relay and ngrok running while using the app. If ngrok gives you a new
+URL, update `APP_PUBLIC_URL`, use the new URL for the passenger app, and restart
+the relay. For SIM808 hardware, configure its `RELAY_HOST` to the tunnel
+hostname and keep its HTTP port at `80`; ngrok terminates external HTTPS for
+the app, while the current SIM808 firmware posts plain HTTP through the
+tunnel's HTTP endpoint.
 
 Before publishing the restrictive Firestore rules, seed ID login mappings
 with `node seed_login_aliases.js` on the relay host using the replacement

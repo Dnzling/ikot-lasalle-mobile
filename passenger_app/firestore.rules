@@ -54,15 +54,16 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // The public lookup contains only a login email and UID. It cannot be
-    // queried as a list and only an administrator may change mappings.
+    // Public lookup by passenger ID; only admins and verified account owners
+    // may modify the Firebase Auth login-email mapping.
     match /loginAliases/{idNumber} {
       allow get: if true;
       allow list: if false;
       allow create, update: if isInitialAdminAlias(idNumber) || isAdmin() ||
         (signedIn() && request.auth.token.email_verified == true &&
          request.resource.data.uid == request.auth.uid &&
-         request.resource.data.email == request.auth.token.email &&
+         request.resource.data.email is string &&
+         request.resource.data.email.lower() == request.auth.token.email.lower() &&
          get(/databases/$(database)/documents/users/$(request.auth.uid))
            .data.idNumber == idNumber &&
          (!exists(/databases/$(database)/documents/loginAliases/$(idNumber)) ||
@@ -95,7 +96,9 @@ service cloud.firestore {
              .hasAny(['emailVerified', 'email']) ||
           request.resource.data.get('emailVerified', false) != true ||
            (request.auth.token.email_verified == true &&
-            request.resource.data.get('email', '') == request.auth.token.email)));
+            request.resource.data.get('email', '') is string &&
+            request.resource.data.get('email', '').lower() ==
+              request.auth.token.email.lower())));
       allow delete: if isAdmin();
 
       match /sessions/{sessionId} {
@@ -208,5 +211,6 @@ service cloud.firestore {
     match /passwordResetRequests/{requestId} {
       allow read, write: if isAdmin();
     }
+
   }
 }

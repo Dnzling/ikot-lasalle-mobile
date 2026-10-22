@@ -26,11 +26,14 @@ struct GpsCacheRecord;
 // Set RELAY_HOST to the public relay host, and use the same private 64-byte
 // hex key as the server. Never commit the real key.
 const char* SIM_APN = "internet";  // Smart
-const char* RELAY_HOST = "77dab05d41e8f4.lhr.life";
+// The SIM808 has successfully uploaded over plain HTTP through this tunnel.
+// Render HTTPS currently fails on this modem with HTTPACTION 603 (DNS error).
+const char* RELAY_HOST = "corset-coveting-thigh.ngrok-free.dev";
 const uint16_t RELAY_PORT = 80;
-const char* RELAY_KEY_HEX = "825ea26ec6cc8f5294d1a2a3e5edbce61a2f5cb05da133d001a81de0cfc92b3711afa10eed313562df695b9f0be132cdb788a76fc9750c72df1ac2f008931bed";
+const bool RELAY_USE_TLS = false;
+const char* RELAY_KEY_HEX = "92b483d06e3c9fab06730dc0c514048b3f82b32adeb9a6a6dd82e9475ff9bdf2d75ceff710f0f0b59b11ac569273e8440a5386aa057b65d5af667ffe2e45a760";
 // Copy the document ID (not the vehicle name) from Firestore > vehicles.
-const char* VEHICLE_DOCUMENT_ID = "Cbzm9w8vC3A5Dp22NeT1";
+const char* VEHICLE_DOCUMENT_ID = "MTNdGikNTX1OybDv24Kn";
 const char* VEHICLE_TYPE = "E-Jeep";
 
 
@@ -565,9 +568,8 @@ const unsigned long ROUTE_SYNC_INTERVAL = 300000;
 const unsigned long ROUTE_RETRY_INTERVAL = 30000;
 const unsigned long FUELING_SYNC_INTERVAL = 300000;
 const unsigned long FUELING_RETRY_INTERVAL = 30000;
-const unsigned long GPS_UPLOAD_INTERVAL = 10000;
+const unsigned long GPS_UPLOAD_INTERVAL = 5000;
 const unsigned long GPS_RESTART_DELAY = 2000;
-const unsigned long LCD_PAGE_INTERVAL = 5000;
 const unsigned long SIM_RETRY_INTERVAL = 15000;
 
 
@@ -579,16 +581,10 @@ unsigned long lastRouteSync = 0;
 unsigned long lastFuelingSync = 0;
 unsigned long lastGPSUpload = 0;
 unsigned long lastSuccessfulGpsUpload = 0;
-unsigned long lastLCDPageSwitch = 0;
 unsigned long lastSIMRetry = 0;
 unsigned long lastCellularRetry = 0;
 bool relayHttpActionPending = false;
 unsigned long relayHttpActionStarted = 0;
-
-
-uint8_t lcdPage = 0;
-
-
 
 
 // =====================================================
@@ -625,9 +621,10 @@ void lcdLine(uint8_t row, String text) {
 
 void displayWelcomeScreen() {
   lcd.clear();
-  lcdLine(0, "HELLO DAY");
-  lcdLine(1, "WELCOME TO");
-  lcdLine(2, "IKOT LASALLE");
+  lcdLine(0, "WELCOME TO IKOT");
+  lcdLine(1, "LA SALLE");
+  lcdLine(2, "TYPE: " + String(VEHICLE_TYPE));
+  lcdLine(3, "");
   delay(3000);
 }
 
@@ -635,10 +632,13 @@ void displayWelcomeScreen() {
 
 
 void displayJeepInformation() {
-  lcdLine(0, "TYPE: " + dbVehicleType);
-  lcdLine(1, vehicleDataLoaded ? "ONBOARD: " + String(onboardCount) : "ONBOARD: --");
-  lcdLine(2, vehicleDataLoaded ? "EXPECTED OFF: " + String(expectedOffboardingCount) : "EXPECTED OFF: --");
-  lcdLine(3, dbVehicleStatus.length() ? "STATUS: " + dbVehicleStatus : "STATUS: --");
+  const String type = dbVehicleType.length() && dbVehicleType != "--"
+      ? dbVehicleType : String(VEHICLE_TYPE);
+  const String status = dbVehicleStatus.length() ? dbVehicleStatus : vehicleStatus;
+  lcdLine(0, "TYPE: " + type);
+  lcdLine(1, "STATUS: " + status);
+  lcdLine(2, vehicleDataLoaded ? "ONBOARD: " + String(onboardCount) : "ONBOARD: --");
+  lcdLine(3, vehicleDataLoaded ? "EXPECTED OFF: " + String(expectedOffboardingCount) : "EXPECTED OFF: --");
 }
 
 
@@ -694,27 +694,7 @@ void setCloudStatus(CloudStatus nextStatus) {
 
 
 void drawCurrentLCDPage() {
-  switch (lcdPage) {
-    case 0: displayGPSLocation(); break;
-    case 1: displayGPSSummary(); break;
-    default: displayJeepInformation(); break;
-  }
-}
-
-
-
-
-void updateLCDPages() {
-  if (millis() - lastLCDPageSwitch >= LCD_PAGE_INTERVAL) {
-    lastLCDPageSwitch = millis();
-    lcdPage = (lcdPage + 1) % 3;
-    const char* pageNames[] = {
-      "GPS details", "GPS summary", "onboard/outboard"
-    };
-    Serial.print("LCD page: ");
-    Serial.println(pageNames[lcdPage]);
-    drawCurrentLCDPage();
-  }
+  displayJeepInformation();
 }
 
 
@@ -1752,6 +1732,15 @@ bool relayHttpPost(const String& payload, String& response) {
     const String url = String("http://") + RELAY_HOST + ":" + RELAY_PORT + "/relay";
     if (sendATCommand(String("AT+HTTPPARA=\"URL\",\"") + url + "\"", 3000).indexOf("OK") < 0) break;
     if (sendATCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 3000).indexOf("OK") < 0) break;
+    // Relay payload remains AES-encrypted and HMAC-authenticated end-to-end.
+    if (sendATCommand(String("AT+HTTPSSL=") + (RELAY_USE_TLS ? "1" : "0"), 3000).indexOf("OK") < 0) {
+      Serial.println("SIM808 could not set the relay transport TLS mode");
+      break;
+    }
+    if (RELAY_USE_TLS && sendATCommand("AT+SSLOPT=0,1", 3000).indexOf("OK") < 0) {
+      Serial.println("SIM808 firmware does not accept AT+SSLOPT=0,1");
+      break;
+    }
     if (sendATCommand(String("AT+HTTPDATA=") + payload.length() + ",10000", 3000).indexOf("DOWNLOAD") < 0) break;
     sim808.print(payload);
     String accepted;
@@ -1968,7 +1957,7 @@ void setup() {
 
 
   displayWelcomeScreen();
-  displayGPSLocation();
+  displayJeepInformation();
 
 
 
@@ -2033,8 +2022,6 @@ void setup() {
 
 
   lastGPSRequest = millis();
-  lastLCDPageSwitch = millis();
-  lcdPage = 0;
   drawCurrentLCDPage();
 }
 
@@ -2051,7 +2038,6 @@ void loop() {
     setCloudStatus(CloudStatus::uploadFailed);
   }
   retrySIM808();
-  updateLCDPages();
   if (sim808Available &&
       millis() - lastGPSRequest >=
       GPS_REQUEST_INTERVAL) {
@@ -2104,6 +2090,5 @@ void loop() {
   }
 
 
-  updateLCDPages();
   yield();
 }

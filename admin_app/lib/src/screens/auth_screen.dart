@@ -203,7 +203,6 @@ class _AuthScreenState extends State<AuthScreen> {
                       obscureText: obscure,
                       decoration: InputDecoration(
                         labelText: 'Password',
-                        helperText: 'Special characters are allowed.',
                         prefixIcon: const Icon(Icons.lock_outline),
                         suffixIcon: IconButton(
                           onPressed: () => setState(() => obscure = !obscure),
@@ -271,6 +270,13 @@ class _Brand extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisSize: MainAxisSize.min,
     children: [
+      Image.asset(
+        'assets/branding/jeep_launcher.png',
+        width: 32,
+        height: 32,
+        fit: BoxFit.contain,
+      ),
+      const SizedBox(width: 10),
       Text(
         'IKOT LA SALLE',
         style: TextStyle(

@@ -662,22 +662,20 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                               left: 12,
                                               right: 12,
                                               bottom: 12,
-                                              child: Card(
-                                                margin: EdgeInsets.zero,
-                                                color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.96),
-                                                child: Padding(
-                                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                                                  child: Column(
-                                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                                    mainAxisSize: MainAxisSize.min,
-                                                    children: [
-                                                      Text('Direction: ${selected.data()['routeDirection'] == 'towardLastStop' ? 'Toward last stop' : selected.data()['routeDirection'] == 'towardFirstStop' ? 'Toward first stop' : 'Unknown'}'),
-                                                      Text(
-                                                        'Last GPS update: ${_gpsUpdateTime(selected.data()['lastGpsAt'])}  •  '
-                                                        'Elapsed: ${_gpsUpdateAge(selected.data()['lastGpsAt'], now)}',
-                                                        style: const TextStyle(fontSize: 12),
-                                                      ),
-                                                    ],
+                                              child: Align(
+                                                alignment: Alignment.bottomLeft,
+                                                child: DecoratedBox(
+                                                  decoration: BoxDecoration(
+                                                    color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.96),
+                                                    borderRadius: BorderRadius.circular(8),
+                                                  ),
+                                                  child: Padding(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                                                    child: Text(
+                                                      'Last GPS update: ${_gpsUpdateTime(selected.data()['lastGpsAt'])}  •  '
+                                                      'Elapsed: ${_gpsUpdateAge(selected.data()['lastGpsAt'], now)}',
+                                                      style: const TextStyle(fontSize: 12),
+                                                    ),
                                                   ),
                                                 ),
                                               ),

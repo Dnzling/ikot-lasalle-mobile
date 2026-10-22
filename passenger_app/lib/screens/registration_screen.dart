@@ -113,6 +113,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               'ID number',
               Icons.badge_outlined,
               keyboard: TextInputType.number,
+              maxLength: 9,
             ),
             const SizedBox(height: 16),
             _field(
@@ -171,18 +172,21 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     IconData icon, {
     bool obscure = false,
     TextInputType? keyboard,
+    int? maxLength,
     String? Function(String?)? validator,
   }) {
     return TextFormField(
       controller: controller,
       obscureText: obscure,
       keyboardType: keyboard,
+      maxLength: maxLength,
       validator: validator ?? requiredField,
       decoration: InputDecoration(
         labelText: label,
         prefixIcon: Icon(icon),
         filled: true,
         fillColor: Colors.white,
+        counterText: maxLength == null ? null : '',
       ),
     );
   }

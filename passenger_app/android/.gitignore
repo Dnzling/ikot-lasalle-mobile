@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# Local Play upload signing credentials and keystore
+key.properties
+*.jks
+*.keystore

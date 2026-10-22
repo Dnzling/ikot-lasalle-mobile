@@ -37,14 +37,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     _checkApi();
     _refreshEmailVerification(silent: true);
-    busSubscription = const PassengerFirebaseService().watchBusLocations().listen(
-      (locations) {
-        if (mounted) setState(() => buses = locations);
-      },
-      onError: (Object error) {
-        if (mounted) setState(() => buses = buses.where((bus) => bus.hasFreshGps).toList());
-      },
-    );
+    busSubscription = const PassengerFirebaseService()
+        .watchBusLocations()
+        .listen(
+          (locations) {
+            if (mounted) setState(() => buses = locations);
+          },
+          onError: (Object error) {
+            if (mounted)
+              setState(
+                () => buses = buses.where((bus) => bus.hasFreshGps).toList(),
+              );
+          },
+        );
     freshnessTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) setState(() {});
     });
@@ -64,7 +69,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final email = emailController.text.trim();
       final alreadyVerified = await const PassengerFirebaseService()
-          .sendPassengerEmailVerification(
+          .sendRecoveryEmailVerification(
             uid: widget.session.uid,
             email: email,
           );
@@ -99,7 +104,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!silent && mounted) setState(() => emailBusy = true);
     try {
       final status = await const PassengerFirebaseService()
-          .refreshPassengerEmail(uid: widget.session.uid);
+          .refreshRecoveryEmailStatus(uid: widget.session.uid);
       if (!mounted) return;
       if (status.verified) {
         widget.session.updatePassenger(
@@ -109,6 +114,17 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
         setState(() => pendingEmail = '');
+        if (!status.profileSynced && !silent) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Recovery email verified and saved.',
+              ),
+            ),
+          );
+        }
+      } else if (status.email.isNotEmpty) {
+        setState(() => pendingEmail = status.email);
       }
     } on FirebaseAuthException catch (error) {
       if (!silent && mounted) {
@@ -223,49 +239,32 @@ class _HomeScreenState extends State<HomeScreen> {
               stream: activeTripStream,
               builder: (context, snapshot) {
                 final trip = snapshot.data;
+                if (snapshot.hasError) {
+                  return const SizedBox(
+                    height: 54,
+                    child: Center(child: Text('Trip status unavailable')),
+                  );
+                }
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const SizedBox(
+                    height: 54,
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                if (trip != null) return _activeTripCard(trip);
                 return SizedBox(
                   height: 54,
                   child: FilledButton.icon(
-                    onPressed:
-                        snapshot.hasError ||
-                            snapshot.connectionState == ConnectionState.waiting
-                        ? null
-                        : () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => trip == null
-                                  ? BookingScreen(session: widget.session)
-                                  : WaitingScreen(
-                                      session: widget.session,
-                                      bookingId: trip.id,
-                                      destination: trip.destination,
-                                      passengerCount: trip.passengerCount,
-                                      fare: trip.fare,
-                                      initialStatus: trip.status,
-                                      createdAt: trip.createdAt,
-                                      pickup: trip.pickup,
-                                      pickupRouteId: trip.pickupRouteId,
-                                      destinationRouteId:
-                                          trip.destinationRouteId,
-                                      vehicleId: trip.vehicleId,
-                                      boardedAt: trip.boardedAt,
-                                    ),
-                            ),
-                          ),
-                    icon: Icon(
-                      trip == null
-                          ? Icons.directions_bus
-                          : Icons.pending_actions_outlined,
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => BookingScreen(session: widget.session),
+                      ),
                     ),
-                    label: Text(
-                      snapshot.hasError
-                          ? 'Trip status unavailable'
-                          : snapshot.connectionState == ConnectionState.waiting
-                          ? 'Checking trip...'
-                          : trip == null
-                          ? 'Start Trip'
-                          : 'View Pending Trip',
-                      style: const TextStyle(
+                    icon: const Icon(Icons.directions_bus),
+                    label: const Text(
+                      'Start Trip',
+                      style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
                       ),
@@ -275,6 +274,112 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _activeTripCard(ActiveTrip trip) {
+    final onboard = trip.isOnboard;
+    final accent = onboard ? const Color(0xFF176B45) : const Color(0xFF8A5A00);
+    final background = onboard
+        ? const Color(0xFFEAF5ED)
+        : const Color(0xFFFFF6E3);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: accent.withValues(alpha: 0.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                onboard ? Icons.directions_bus_filled : Icons.bookmark_added,
+                color: accent,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  onboard ? 'RIDE IN PROGRESS' : 'ACTIVE BOOKING',
+                  style: TextStyle(
+                    color: accent,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
+              if (onboard)
+                const Icon(Icons.circle, size: 9, color: Color(0xFF20A35B)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (onboard) ...[
+            const Text(
+              'Your next stop',
+              style: TextStyle(color: Colors.black54, fontSize: 12),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              trip.destination,
+              style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'You are onboard. Open your ride for live vehicle location and arrival updates.',
+              style: TextStyle(color: Colors.black54, fontSize: 12),
+            ),
+          ] else ...[
+            Text(
+              '${trip.pickup ?? 'Pickup stop'} to ${trip.destination}',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'Waiting for boarding. Open your ride to scan the vehicle QR code.',
+              style: TextStyle(color: Colors.black54, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: FilledButton.icon(
+              onPressed: () => _openActiveTrip(trip),
+              icon: const Icon(Icons.open_in_new),
+              label: const Text(
+                'View ride',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              style: FilledButton.styleFrom(backgroundColor: accent),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openActiveTrip(ActiveTrip trip) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => WaitingScreen(
+          session: widget.session,
+          bookingId: trip.id,
+          destination: trip.destination,
+          passengerCount: trip.passengerCount,
+          fare: trip.fare,
+          initialStatus: trip.status,
+          createdAt: trip.createdAt,
+          pickup: trip.pickup,
+          pickupRouteId: trip.pickupRouteId,
+          destinationRouteId: trip.destinationRouteId,
+          vehicleId: trip.vehicleId,
+          boardedAt: trip.boardedAt,
         ),
       ),
     );
@@ -293,7 +398,7 @@ class _HomeScreenState extends State<HomeScreen> {
               SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'Verify your email',
+                  'Set password recovery email',
                   style: TextStyle(fontWeight: FontWeight.w800),
                 ),
               ),
@@ -302,7 +407,7 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 8),
           Text(
             pendingEmail.isEmpty
-                ? 'Add an email address so you can recover your password. We will send a verification link.'
+                ? 'Add an email address for password recovery. Verifying it will not change your passenger ID sign-in.'
                 : 'Open the verification link sent to $pendingEmail, then return here.',
           ),
           if (pendingEmail.isEmpty) ...[

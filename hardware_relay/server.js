@@ -98,12 +98,12 @@ async function execute(message) {
       if (!snapshot.data().type && type) update.type = type;
       tx.update(ref, update);
     });
-    try {
-      await processOverstays({admin, db, vehicleId: message.deviceId,
-        latitude, longitude, routeDirection});
-    } catch (error) {
-      console.error('Overstay check failed:', error.message);
-    }
+    // Acknowledge the GPS write as soon as Firestore commits it. Overstay
+    // checks are ancillary and can take longer than the SIM808 HTTP window;
+    // do not let their latency turn a saved GPS point into a lost ACK.
+    void processOverstays({admin, db, vehicleId: message.deviceId,
+      latitude, longitude, routeDirection})
+      .catch((error) => console.error('Overstay check failed:', error.message));
     return {ok: true};
   }
   if (message.op === 'routes') {

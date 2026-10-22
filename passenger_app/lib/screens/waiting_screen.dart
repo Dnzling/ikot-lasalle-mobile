@@ -57,6 +57,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   bool phoneGpsRunning = false;
   late final Stream<List<BusLocation>> vehicleLocations;
   StreamSubscription<List<BusLocation>>? vehicleSubscription;
+  StreamSubscription<int>? overstayPenaltySubscription;
   BusLocation? assignedVehicle;
   String? assignedVehicleId;
   DateTime? boardedAt;
@@ -72,6 +73,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
   List<String> routeNames = const [];
   bool stopReached = false;
   bool overstayAlerted = false;
+  int overstayPenaltyCredits = 10;
 
   @override
   void initState() {
@@ -90,6 +92,18 @@ class _WaitingScreenState extends State<WaitingScreen> {
         debugPrint('Could not monitor vehicle location: $error');
       },
     );
+    overstayPenaltySubscription = const PassengerFirebaseService()
+        .watchOverstayingPenaltyCredits()
+        .listen(
+          (credits) {
+            if (mounted && credits != overstayPenaltyCredits) {
+              setState(() => overstayPenaltyCredits = credits);
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint('Could not load overstaying penalty: $error');
+          },
+        );
     _loadStops();
     etaTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted && boarded && !arrived) setState(() {});
@@ -123,6 +137,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
     proximityTimer?.cancel();
     phoneGpsTimer?.cancel();
     vehicleSubscription?.cancel();
+    overstayPenaltySubscription?.cancel();
     super.dispose();
   }
 
@@ -355,7 +370,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
         builder: (dialogContext) => AlertDialog(
           title: const Text('You are overstaying'),
           content: Text(
-            'You are overstaying. 10 credits will be deducted. Please drop off at $nextRoute. If you already got off, tap I have arrived.',
+            'You are overstaying. $overstayPenaltyCredits credits will be deducted. Please drop off at $nextRoute. If you already got off, tap I have arrived.',
           ),
           actions: [
             TextButton(
@@ -639,8 +654,8 @@ class _WaitingScreenState extends State<WaitingScreen> {
         ),
         if (boarded) ...[
           const SizedBox(height: 8),
-          const Text(
-            'Overstaying is punishable with 10 credits.',
+          Text(
+            'Overstaying is punishable with $overstayPenaltyCredits credits.',
             style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),

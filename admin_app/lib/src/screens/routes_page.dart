@@ -346,9 +346,9 @@ class _RoutesPageState extends State<RoutesPage> {
                   final confirmed = await showDialog<bool>(
                     context: dialogContext,
                     builder: (confirmationContext) => AlertDialog(
-                      title: const Text('Archive and remove route?'),
+                      title: const Text('Archive route?'),
                       content: Text(
-                        '${data['name'] ?? 'This route'} will be hidden from active routes and unavailable for new passenger trips. Its database record and past trips will remain. You can restore it from archived routes.',
+                        '${data['name'] ?? 'This route'} will be hidden from active routes and unavailable for new passenger trips. Its record will remain in the database, and you can restore it later from archived routes.',
                       ),
                       actions: [
                         TextButton(
@@ -359,7 +359,7 @@ class _RoutesPageState extends State<RoutesPage> {
                         FilledButton(
                           onPressed: () =>
                               Navigator.pop(confirmationContext, true),
-                          child: const Text('Archive and Remove'),
+                          child: const Text('Archive'),
                         ),
                       ],
                     ),
@@ -369,13 +369,15 @@ class _RoutesPageState extends State<RoutesPage> {
                   try {
                     await FirebaseService.instance.archiveRoute(route.id);
                     if (mounted) setState(() => selectedId = null);
-                    _notice('Route archived and removed from display. You can restore it from archived routes.');
+                    _notice(
+                      'Route archived. You can restore it from archived routes.',
+                    );
                   } on FirebaseException catch (error) {
                     _notice('Request ${error.code}: ${error.message}');
                   }
                 },
                 icon: const Icon(Icons.archive_outlined),
-                label: const Text('Archive and Remove'),
+                label: const Text('Archive'),
               )
             else
               TextButton.icon(
@@ -392,6 +394,47 @@ class _RoutesPageState extends State<RoutesPage> {
                 },
                 icon: const Icon(Icons.unarchive_outlined),
                 label: const Text('Restore'),
+              ),
+            if (data['removed'] != true)
+              TextButton.icon(
+                onPressed: () async {
+                  final confirmed = await showDialog<bool>(
+                    context: dialogContext,
+                    builder: (confirmationContext) => AlertDialog(
+                      title: const Text('Remove route from display?'),
+                      content: Text(
+                        '${data['name'] ?? 'This route'} will disappear from active and archived route lists and won’t be available to passenger bookings. Its database record and past trips will remain. This action cannot be undone in the admin app.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () =>
+                              Navigator.pop(confirmationContext, false),
+                          child: const Text('Cancel'),
+                        ),
+                        FilledButton(
+                          onPressed: () =>
+                              Navigator.pop(confirmationContext, true),
+                          child: const Text('Remove'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirmed != true || !dialogContext.mounted) return;
+                  Navigator.pop(dialogContext);
+                  try {
+                    await FirebaseService.instance.removeRouteFromDisplay(
+                      route.id,
+                    );
+                    if (mounted) setState(() => selectedId = null);
+                    _notice(
+                      'Route removed from display. Its database record remains.',
+                    );
+                  } on FirebaseException catch (error) {
+                    _notice('Request ${error.code}: ${error.message}');
+                  }
+                },
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Remove'),
               ),
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
@@ -462,6 +505,7 @@ class _RoutesPageState extends State<RoutesPage> {
         );
       }
       final routes = [...?snapshot.data?.docs]
+          .where((route) => route.data()['removed'] != true)
           .where((route) => (route.data()['archived'] == true) == showArchived)
           .toList();
       routes.sort((a, b) {
@@ -488,226 +532,244 @@ class _RoutesPageState extends State<RoutesPage> {
           : null;
       return LayoutBuilder(
         builder: (context, constraints) => SingleChildScrollView(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          children: [
-            PageIntro(
-              title: 'Routes',
-              subtitle: 'Route points and geofences.',
-              action: Row(
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: selected == null
-                        ? null
-                        : () => _editRoute(selected),
-                    icon: const Icon(Icons.edit_outlined),
-                    label: const Text('Edit route'),
-                  ),
-                  const SizedBox(width: 10),
-                  FilledButton.icon(
-                    onPressed: _addRoute,
-                    icon: const Icon(Icons.add_location_alt),
-                    label: const Text('Add route'),
-                  ),
-                ],
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            children: [
+              PageIntro(
+                title: 'Routes',
+                subtitle: 'Route points and geofences.',
+                action: Row(
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: selected == null
+                          ? null
+                          : () => _editRoute(selected),
+                      icon: const Icon(Icons.edit_outlined),
+                      label: const Text('Edit route'),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton.icon(
+                      onPressed: _addRoute,
+                      icon: const Icon(Icons.add_location_alt),
+                      label: const Text('Add route'),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 22),
-            SizedBox(
-              height: (constraints.maxHeight - 160).clamp(500.0, 1200.0),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 350,
-                    child: Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                const Expanded(
-                                  child: Text(
-                                    'Route points',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                ),
-                                IconButton(
-                                  tooltip: showArchived
-                                      ? 'Show active routes'
-                                      : 'Show archived routes',
-                                  onPressed: () => setState(() {
-                                    showArchived = !showArchived;
-                                    selectedId = null;
-                                  }),
-                                  icon: Icon(
-                                    showArchived
-                                        ? Icons.route_outlined
-                                        : Icons.archive_outlined,
-                                  ),
-                                ),
-                                if (snapshot.connectionState ==
-                                    ConnectionState.waiting)
-                                  const SizedBox.square(
-                                    dimension: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            Expanded(
-                              child: routes.isEmpty
-                                  ? const Center(
-                                      child: Text(
-                                        'No routes saved.',
-                                        style: TextStyle(color: Colors.black45),
+              const SizedBox(height: 22),
+              SizedBox(
+                height: (constraints.maxHeight - 160).clamp(500.0, 1200.0),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 350,
+                      child: Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'Route points',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w800,
                                       ),
-                                    )
-                                  : ReorderableListView.builder(
-                                      buildDefaultDragHandles: false,
-                                      itemCount: routes.length,
-                                      onReorderItem: (oldIndex, newIndex) async {
-                                        final ids = routes
-                                            .map((route) => route.id)
-                                            .toList();
-                                        final moved = ids.removeAt(oldIndex);
-                                        ids.insert(newIndex, moved);
-                                        try {
-                                          await FirebaseService.instance
-                                              .reorderRoutes(ids);
-                                          _notice('Route order updated.');
-                                        } on FirebaseException catch (error) {
-                                          _notice(
-                                            'Request ${error.code}: ${error.message}',
-                                          );
-                                        }
-                                      },
-                                      itemBuilder: (_, index) {
-                                        final route = routes[index],
-                                            data = route.data();
-                                        return ListTile(
-                                          key: ValueKey(route.id),
-                                          selected: route.id == selectedId,
-                                          selectedTileColor: const Color(
-                                            0xFFE5F4EA,
+                                    ),
+                                  ),
+                                  IconButton(
+                                    tooltip: showArchived
+                                        ? 'Show active routes'
+                                        : 'Show archived routes',
+                                    onPressed: () => setState(() {
+                                      showArchived = !showArchived;
+                                      selectedId = null;
+                                    }),
+                                    icon: Icon(
+                                      showArchived
+                                          ? Icons.route_outlined
+                                          : Icons.archive_outlined,
+                                    ),
+                                  ),
+                                  if (snapshot.connectionState ==
+                                      ConnectionState.waiting)
+                                    const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Expanded(
+                                child: routes.isEmpty
+                                    ? const Center(
+                                        child: Text(
+                                          'No routes saved.',
+                                          style: TextStyle(
+                                            color: Colors.black45,
                                           ),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(
-                                              10,
+                                        ),
+                                      )
+                                    : ReorderableListView.builder(
+                                        buildDefaultDragHandles: false,
+                                        itemCount: routes.length,
+                                        onReorderItem: (oldIndex, newIndex) async {
+                                          final ids = routes
+                                              .map((route) => route.id)
+                                              .toList();
+                                          final moved = ids.removeAt(oldIndex);
+                                          ids.insert(newIndex, moved);
+                                          try {
+                                            await FirebaseService.instance
+                                                .reorderRoutes(ids);
+                                            _notice('Route order updated.');
+                                          } on FirebaseException catch (error) {
+                                            _notice(
+                                              'Request ${error.code}: ${error.message}',
+                                            );
+                                          }
+                                        },
+                                        itemBuilder: (_, index) {
+                                          final route = routes[index],
+                                              data = route.data();
+                                          return ListTile(
+                                            key: ValueKey(route.id),
+                                            selected: route.id == selectedId,
+                                            selectedTileColor: const Color(
+                                              0xFFE5F4EA,
                                             ),
-                                          ),
-                                          leading: CircleAvatar(
-                                            child: Text('${index + 1}'),
-                                          ),
-                                          title: Text(
-                                            '${data['name'] ?? 'Unnamed route'}',
-                                          ),
-                                          subtitle: Text(
-                                            '${data['proximityRadius'] ?? 0} m radius • ${data['active'] == false ? 'Inactive' : 'Active'}',
-                                          ),
-                                          trailing: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              if (!showArchived)
-                                                Switch(
-                                                  value:
-                                                      data['active'] != false,
-                                                  onChanged: (active) async {
-                                                    try {
-                                                      await FirebaseService
-                                                          .instance
-                                                          .setRouteActive(
-                                                            route.id,
-                                                            active,
-                                                          );
-                                                    } on FirebaseException catch (
-                                                      error
-                                                    ) {
-                                                      _notice(
-                                                        'Request ${error.code}: ${error.message}',
-                                                      );
-                                                    }
-                                                  },
-                                                ),
-                                              ReorderableDragStartListener(
-                                                index: index,
-                                                child: const Padding(
-                                                  padding: EdgeInsets.all(8),
-                                                  child: Icon(
-                                                    Icons.drag_indicator,
-                                                    color: Colors.black45,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            leading: CircleAvatar(
+                                              child: Text('${index + 1}'),
+                                            ),
+                                            title: Text(
+                                              '${data['name'] ?? 'Unnamed route'}',
+                                            ),
+                                            subtitle: Text(
+                                              '${data['proximityRadius'] ?? 0} m radius • ${data['active'] == false ? 'Inactive' : 'Active'}',
+                                            ),
+                                            trailing: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                if (!showArchived)
+                                                  Switch(
+                                                    value:
+                                                        data['active'] != false,
+                                                    onChanged: (active) async {
+                                                      try {
+                                                        await FirebaseService
+                                                            .instance
+                                                            .setRouteActive(
+                                                              route.id,
+                                                              active,
+                                                            );
+                                                      } on FirebaseException catch (
+                                                        error
+                                                      ) {
+                                                        _notice(
+                                                          'Request ${error.code}: ${error.message}',
+                                                        );
+                                                      }
+                                                    },
+                                                  ),
+                                                ReorderableDragStartListener(
+                                                  index: index,
+                                                  child: const Padding(
+                                                    padding: EdgeInsets.all(8),
+                                                    child: Icon(
+                                                      Icons.drag_indicator,
+                                                      color: Colors.black45,
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ],
-                                          ),
-                                          onTap: () => setState(
-                                            () => selectedId = route.id,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                            ),
-                          ],
+                                              ],
+                                            ),
+                                            onTap: () => setState(
+                                              () => selectedId = route.id,
+                                            ),
+                                          );
+                                        },
+                                      ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 18),
-                  Expanded(
-                    child: Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: selected == null
-                            ? const Center(
-                                child: Text(
-                                  'Select a route to view its location.',
+                    const SizedBox(width: 18),
+                    Expanded(
+                      child: Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: selected == null
+                              ? const Center(
+                                  child: Text(
+                                    'Select a route to view its location.',
+                                  ),
+                                )
+                              : RealMap(
+                                  key: ValueKey(selected.id),
+                                  latitude: geoPoint?.latitude,
+                                  longitude: geoPoint?.longitude,
+                                  radiusMeters:
+                                      (selectedData?['proximityRadius'] as num?)
+                                          ?.toDouble(),
+                                  label: '${selectedData?['name'] ?? 'Route'}',
+                                  fitAllPins: true,
+                                  additionalPins: [
+                                    for (final route in routes)
+                                      if (route.id != selected.id &&
+                                          route.data()['location'] is GeoPoint)
+                                        (
+                                          latitude:
+                                              (route.data()['location']
+                                                      as GeoPoint)
+                                                  .latitude,
+                                          longitude:
+                                              (route.data()['location']
+                                                      as GeoPoint)
+                                                  .longitude,
+                                          label:
+                                              '${route.data()['name'] ?? 'Route'}',
+                                        ),
+                                  ],
+                                  additionalRadii: [
+                                    for (final route in routes)
+                                      if (route.id != selected.id &&
+                                          route.data()['location'] is GeoPoint)
+                                        (
+                                          latitude:
+                                              (route.data()['location']
+                                                      as GeoPoint)
+                                                  .latitude,
+                                          longitude:
+                                              (route.data()['location']
+                                                      as GeoPoint)
+                                                  .longitude,
+                                          radiusMeters:
+                                              ((route.data()['proximityRadius']
+                                                      as num?)
+                                                  ?.toDouble() ??
+                                              40),
+                                        ),
+                                  ],
                                 ),
-                              )
-                            : RealMap(
-                                key: ValueKey(selected.id),
-                                latitude: geoPoint?.latitude,
-                                longitude: geoPoint?.longitude,
-                                radiusMeters:
-                                    (selectedData?['proximityRadius'] as num?)
-                                        ?.toDouble(),
-                                label: '${selectedData?['name'] ?? 'Route'}',
-                                fitAllPins: true,
-                                additionalPins: [
-                                  for (final route in routes)
-                                    if (route.id != selected.id &&
-                                        route.data()['location'] is GeoPoint)
-                                      (
-                                        latitude: (route.data()['location'] as GeoPoint).latitude,
-                                        longitude: (route.data()['location'] as GeoPoint).longitude,
-                                        label: '${route.data()['name'] ?? 'Route'}',
-                                      ),
-                                ],
-                                additionalRadii: [
-                                  for (final route in routes)
-                                    if (route.id != selected.id &&
-                                        route.data()['location'] is GeoPoint)
-                                      (
-                                        latitude: (route.data()['location'] as GeoPoint).latitude,
-                                        longitude: (route.data()['location'] as GeoPoint).longitude,
-                                        radiusMeters: ((route.data()['proximityRadius'] as num?)?.toDouble() ?? 40),
-                                      ),
-                                ],
-                              ),
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 18),
-          ],
-        ),
+              const SizedBox(height: 18),
+            ],
+          ),
         ),
       );
     },

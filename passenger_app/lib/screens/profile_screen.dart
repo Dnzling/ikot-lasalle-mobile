@@ -147,7 +147,9 @@ class ProfileScreen extends StatelessWidget {
                 context: context,
                 builder: (dialogContext) => AlertDialog(
                   title: const Text('Log out?'),
-                  content: const Text('Are you sure you want to log out of your passenger account?'),
+                  content: const Text(
+                    'Are you sure you want to log out of your passenger account?',
+                  ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(dialogContext, false),
@@ -191,7 +193,7 @@ class ProfileScreen extends StatelessWidget {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (dialogContext, setDialogState) => AlertDialog(
-          title: const Text('Change email address'),
+          title: const Text('Set password recovery email'),
           content: SizedBox(
             width: 420,
             child: Column(
@@ -199,7 +201,7 @@ class ProfileScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'We will send a verification link. Your profile email is updated only after you open the link and confirm here.',
+                  'We will send a verification link to this address for password recovery. Your passenger ID sign-in email will not change.',
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -243,7 +245,7 @@ class ProfileScreen extends StatelessWidget {
                         });
                         try {
                           final result = await const PassengerFirebaseService()
-                              .refreshPassengerEmail(uid: session.uid);
+                              .refreshRecoveryEmailStatus(uid: session.uid);
                           if (!dialogContext.mounted) return;
                           if (!result.verified ||
                               result.email.toLowerCase() !=
@@ -262,9 +264,11 @@ class ProfileScreen extends StatelessWidget {
                           );
                           Navigator.pop(dialogContext);
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
+                            SnackBar(
                               content: Text(
-                                'Verified email saved to your profile.',
+                                result.profileSynced
+                                    ? 'Recovery email verified and saved.'
+                                    : 'Recovery email is not verified yet.',
                               ),
                             ),
                           );
@@ -291,7 +295,7 @@ class ProfileScreen extends StatelessWidget {
                       try {
                         final alreadyVerified =
                             await const PassengerFirebaseService()
-                                .sendPassengerEmailVerification(
+                                .sendRecoveryEmailVerification(
                                   uid: session.uid,
                                   email: controller.text,
                                 );
@@ -307,7 +311,7 @@ class ProfileScreen extends StatelessWidget {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                'Verified email saved to your profile.',
+                                'Recovery email is already verified and saved.',
                               ),
                             ),
                           );

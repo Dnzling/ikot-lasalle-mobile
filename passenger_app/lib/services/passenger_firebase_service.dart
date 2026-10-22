@@ -30,17 +30,32 @@ class PassengerFirebaseService {
   static final _auth = FirebaseAuth.instance;
   static final _db = FirebaseFirestore.instance;
   static final _preferences = SharedPreferencesAsync();
-  static const _trustedApiBase = String.fromEnvironment('TRUSTED_API_BASE_URL');
+  static const _trustedApiBase = String.fromEnvironment(
+    'TRUSTED_API_BASE_URL',
+    defaultValue: 'https://ikot-lasalle-mobile.onrender.com',
+  );
 
-  Future<void> _syncLoginAlias(String uid, String idNumber, String email) async {
-    if (idNumber.isEmpty || email.isEmpty ||
-        _auth.currentUser?.uid != uid ||
-        _auth.currentUser?.emailVerified != true) return;
-    await _auth.currentUser!.getIdToken(true);
-    await _db.collection('loginAliases').doc(idNumber).set({
-      'uid': uid,
-      'email': email.toLowerCase(),
-    });
+  StateError _trustedApiError(http.Response response) {
+    dynamic result;
+    try {
+      result = jsonDecode(response.body);
+    } on FormatException {
+      final body = response.body.trim();
+      if (body.isEmpty) {
+        return StateError(
+          'The relay returned an empty response (HTTP ${response.statusCode}). '
+          'Check that the latest recovery backend is deployed at $_trustedApiBase.',
+        );
+      }
+      final detail = body.length > 180 ? '${body.substring(0, 180)}…' : body;
+      return StateError(
+        'The relay returned a non-JSON response (HTTP ${response.statusCode}): $detail',
+      );
+    }
+    if (result is Map && result['error'] != null) {
+      return StateError('${result['error']}');
+    }
+    return StateError('Relay request failed (HTTP ${response.statusCode}).');
   }
 
   Future<Map<String, dynamic>> _trustedRequest(
@@ -54,18 +69,50 @@ class PassengerFirebaseService {
     final user = _auth.currentUser;
     if (user == null) throw StateError('Sign in again to continue.');
     final token = await user.getIdToken();
-    final response = await http.post(
-      base.resolve(path),
-      headers: {
-        'Authorization': 'Bearer $token',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(payload),
-    ).timeout(const Duration(seconds: 20));
-    final result = jsonDecode(response.body);
-    if (response.statusCode != 200 || result is! Map<String, dynamic>) {
-      throw StateError(result is Map ? '${result['error'] ?? 'Request failed.'}' : 'Request failed.');
+    final response = await http
+        .post(
+          base.resolve(path),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) throw _trustedApiError(response);
+    dynamic result;
+    try {
+      result = jsonDecode(response.body);
+    } on FormatException {
+      throw _trustedApiError(response);
     }
+    if (result is! Map<String, dynamic>) throw _trustedApiError(response);
+    return result;
+  }
+
+  Future<Map<String, dynamic>> _publicTrustedRequest(
+    String path,
+    Map<String, dynamic> payload,
+  ) async {
+    final base = Uri.tryParse(_trustedApiBase);
+    if (base == null || base.scheme != 'https' || base.host.isEmpty) {
+      throw StateError('Trusted API is not configured with an HTTPS address.');
+    }
+    final response = await http
+        .post(
+          base.resolve(path),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 25));
+    if (response.statusCode != 200) throw _trustedApiError(response);
+    dynamic result;
+    try {
+      result = jsonDecode(response.body);
+    } on FormatException {
+      throw _trustedApiError(response);
+    }
+    if (result is! Map<String, dynamic>) throw _trustedApiError(response);
     return result;
   }
 
@@ -87,11 +134,16 @@ class PassengerFirebaseService {
     required String vehicleId,
     required geo.Position position,
   }) async {
-    if (position.accuracy > 30 || position.accuracy < 0 ||
-        DateTime.now().difference(position.timestamp) > const Duration(seconds: 10) ||
+    if (position.accuracy > 30 ||
+        position.accuracy < 0 ||
+        DateTime.now().difference(position.timestamp) >
+            const Duration(seconds: 10) ||
         !(await isSelectedPhoneReporter(
-          uid: uid, bookingId: bookingId, vehicleId: vehicleId,
-        ))) return;
+          uid: uid,
+          bookingId: bookingId,
+          vehicleId: vehicleId,
+        )))
+      return;
     await _db.collection('trips').doc(bookingId).update({
       'phoneLocation': GeoPoint(position.latitude, position.longitude),
       'phoneGpsAt': FieldValue.serverTimestamp(),
@@ -218,50 +270,24 @@ class PassengerFirebaseService {
         password: password,
       );
     } on FirebaseAuthException catch (aliasError, stackTrace) {
-      // Admin-created accounts authenticate with the email stored on their
-      // Firestore profile. Look it up by the ID number entered on this screen.
+      // Admin-created accounts use the Firebase Auth email stored in the
+      // passenger ID alias, while the passenger still signs in with ID.
       if (aliasError.code != 'user-not-found' &&
           aliasError.code != 'invalid-credential') {
         rethrow;
       }
       final alias = await _db.collection('loginAliases').doc(cleanId).get();
-      if (!alias.exists) {
-        Error.throwWithStackTrace(aliasError, stackTrace);
+      if (!alias.exists) Error.throwWithStackTrace(aliasError, stackTrace);
+      final authEmail = '${alias.data()?['email'] ?? ''}'.trim();
+      if (authEmail.isEmpty) Error.throwWithStackTrace(aliasError, stackTrace);
+      try {
+        credential = await _auth.signInWithEmailAndPassword(
+          email: authEmail,
+          password: password,
+        );
+      } on FirebaseAuthException catch (error) {
+        Error.throwWithStackTrace(error, stackTrace);
       }
-      final profileData = alias.data()!;
-      final emailCandidates = <String>[
-        '${profileData['pendingEmail'] ?? ''}'.trim(),
-        '${profileData['email'] ?? ''}'.trim(),
-      ].where((email) => email.isNotEmpty).toSet();
-      if (emailCandidates.isEmpty) {
-        Error.throwWithStackTrace(aliasError, stackTrace);
-      }
-      UserCredential? emailCredential;
-      FirebaseAuthException? latestEmailError;
-      for (final authEmail in emailCandidates) {
-        try {
-          emailCredential = await _auth.signInWithEmailAndPassword(
-            email: authEmail,
-            password: password,
-          );
-          latestEmailError = null;
-          break;
-        } on FirebaseAuthException catch (error) {
-          latestEmailError = error;
-          if (error.code != 'user-not-found' &&
-              error.code != 'invalid-credential' &&
-              error.code != 'wrong-password') {
-            rethrow;
-          }
-        }
-      }
-      if (emailCredential == null) {
-        if (latestEmailError != null) {
-          Error.throwWithStackTrace(latestEmailError, stackTrace);
-        }
-        Error.throwWithStackTrace(aliasError, stackTrace);
-      }
-      credential = emailCredential;
     }
     final user = credential.user!;
     final profile = await _db.collection('users').doc(user.uid).get();
@@ -278,33 +304,6 @@ class PassengerFirebaseService {
       throw StateError(
         'This account is inactive. Please contact the administrator.',
       );
-    }
-    // Email verification changes the Firebase Auth email first. A passenger
-    // may sign out before pressing the Home screen's refresh button, leaving
-    // the Firestore lookup stale. Once Auth confirms the verified address,
-    // repair that mapping as part of the successful sign-in.
-    if (user.emailVerified && user.email != null && user.email!.isNotEmpty) {
-      try {
-        await _db.collection('users').doc(user.uid).set({
-          'email': user.email!.trim().toLowerCase(),
-          'emailVerified': true,
-          'emailVerifiedAt': FieldValue.serverTimestamp(),
-          'pendingEmail': FieldValue.delete(),
-        }, SetOptions(merge: true));
-      } catch (_) {
-        // Authentication has succeeded; do not turn a profile-sync issue
-        // into a misleading invalid-credential login failure.
-      }
-      data = {
-        ...data,
-        'email': user.email!.trim().toLowerCase(),
-        'emailVerified': true,
-      };
-      try {
-        await _syncLoginAlias(user.uid, cleanId, user.email!.trim());
-      } catch (_) {
-        // Sign-in remains usable even if the alias needs an administrator repair.
-      }
     }
     // A hot restart can show the login screen while this same installation
     // still holds its Firebase Auth session. Resume that session instead of
@@ -386,7 +385,7 @@ class PassengerFirebaseService {
     return _passenger(uid, data);
   }
 
-  Future<bool> sendPassengerEmailVerification({
+  Future<bool> sendRecoveryEmailVerification({
     required String uid,
     required String email,
   }) async {
@@ -398,48 +397,35 @@ class PassengerFirebaseService {
     if (user == null || user.uid != uid) {
       throw StateError('Your login session expired. Please sign in again.');
     }
-    if (user.email?.toLowerCase() == cleanEmail.toLowerCase() &&
-        user.emailVerified) {
-      await _db.collection('users').doc(uid).set({
-        'email': cleanEmail,
-        'emailVerified': true,
-        'emailVerifiedAt': FieldValue.serverTimestamp(),
-        'pendingEmail': FieldValue.delete(),
-      }, SetOptions(merge: true));
-      await _syncLoginAlias(uid, '${(await _db.collection('users').doc(uid).get()).data()?['idNumber'] ?? ''}', cleanEmail);
+    final profile = await _db.collection('users').doc(uid).get();
+    final data = profile.data();
+    if (data?['recoveryEmailVerified'] == true &&
+        '${data?['recoveryEmail'] ?? ''}'.toLowerCase() == cleanEmail) {
       return true;
     }
-    await _db.collection('users').doc(uid).set({
-      'pendingEmail': cleanEmail,
-      'emailVerified': false,
-      'emailVerificationSentAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-    await user.verifyBeforeUpdateEmail(cleanEmail);
+    await _trustedRequest('/api/recovery/start-verification', {
+      'email': cleanEmail,
+    });
     return false;
   }
 
-  Future<({String email, bool verified})> refreshPassengerEmail({
-    required String uid,
-  }) async {
-    var user = _auth.currentUser;
-    if (user == null || user.uid != uid) {
+  Future<({String email, bool verified, bool profileSynced})>
+  refreshRecoveryEmailStatus({required String uid}) async {
+    if (_auth.currentUser?.uid != uid) {
       throw StateError('Your login session expired. Please sign in again.');
     }
-    await user.reload();
-    user = _auth.currentUser;
-    final email = (user?.email ?? '').toLowerCase();
-    final verified = user?.emailVerified ?? false;
-    final userRef = _db.collection('users').doc(uid);
-    if (verified && email.isNotEmpty) {
-      await userRef.set({
-        'email': email,
-        'emailVerified': true,
-        'emailVerifiedAt': FieldValue.serverTimestamp(),
-        'pendingEmail': FieldValue.delete(),
-      }, SetOptions(merge: true));
-      await _syncLoginAlias(uid, '${(await userRef.get()).data()?['idNumber'] ?? ''}', email);
-    }
-    return (email: email, verified: verified);
+    final snapshot = await _db.collection('users').doc(uid).get();
+    final data = snapshot.data();
+    if (data == null) throw StateError('Passenger profile not found.');
+    final verified = data['recoveryEmailVerified'] == true;
+    final email = (verified
+            ? data['recoveryEmail']
+            : (data['pendingRecoveryEmail'] ?? data['recoveryEmail']))
+        ?.toString()
+        .trim()
+        .toLowerCase() ??
+        '';
+    return (email: email, verified: verified, profileSynced: verified);
   }
 
   Future<void> sendPasswordResetLink({required String email}) async {
@@ -448,9 +434,9 @@ class PassengerFirebaseService {
     if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(cleanEmail)) {
       throw ArgumentError('Enter a valid email address.');
     }
-    await _auth
-        .sendPasswordResetEmail(email: cleanEmail)
-        .timeout(const Duration(seconds: 20));
+    await _publicTrustedRequest('/api/recovery/request-reset', {
+      'email': cleanEmail,
+    });
   }
 
   Future<void> requestPasswordReset({
@@ -612,12 +598,16 @@ class PassengerFirebaseService {
       if (current == null || controller.isClosed) return;
       final now = DateTime.now();
       final candidates = <String, List<Map<String, dynamic>>>{};
-      for (final trip in trips?.docs ?? <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+      for (final trip
+          in trips?.docs ?? <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
         final data = trip.data();
         final vehicleId = '${data['vehicleId'] ?? ''}';
-        if (vehicleId.isEmpty || data['status'] != 'onboard' ||
-            data['phoneLocation'] is! GeoPoint || data['phoneGpsAt'] is! Timestamp ||
-            (_number(data['phoneGpsAccuracyMeters'], fallback: 999) > 30)) continue;
+        if (vehicleId.isEmpty ||
+            data['status'] != 'onboard' ||
+            data['phoneLocation'] is! GeoPoint ||
+            data['phoneGpsAt'] is! Timestamp ||
+            (_number(data['phoneGpsAccuracyMeters'], fallback: 999) > 30))
+          continue;
         final age = now.difference((data['phoneGpsAt'] as Timestamp).toDate());
         if (age.isNegative || age > const Duration(seconds: 10)) continue;
         candidates.putIfAbsent(vehicleId, () => []).add(data);
@@ -633,43 +623,69 @@ class PassengerFirebaseService {
         DateTime? effectiveAt = hardwareAt?.toDate();
         var locationSource = 'hardware';
         final available = candidates[doc.id] ?? [];
-        available.sort((a, b) =>
-            ((a['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
-                .compareTo((b['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
+        available.sort(
+          (a, b) =>
+              ((a['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
+                  .compareTo(
+                    (b['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0,
+                  ),
+        );
         for (final candidate in available) {
           final phone = candidate['phoneLocation'] as GeoPoint;
           final phoneAt = (candidate['phoneGpsAt'] as Timestamp).toDate();
-          if (hardware == null || hardwareAt == null ||
+          if (hardware == null ||
+              hardwareAt == null ||
               !phoneAt.isAfter(hardwareAt.toDate()) ||
-              now.difference(hardwareAt.toDate()) > const Duration(seconds: 120) ||
-              geo.Geolocator.distanceBetween(phone.latitude, phone.longitude,
-                  hardware.latitude, hardware.longitude) > 500) continue;
+              now.difference(hardwareAt.toDate()) >
+                  const Duration(seconds: 120) ||
+              geo.Geolocator.distanceBetween(
+                    phone.latitude,
+                    phone.longitude,
+                    hardware.latitude,
+                    hardware.longitude,
+                  ) >
+                  500)
+            continue;
           effective = phone;
           effectiveAt = phoneAt;
           locationSource = 'phone';
           break;
         }
         final bus = BusLocation(
-          id: doc.id, label: '${data['name'] ?? doc.id}',
+          id: doc.id,
+          label: '${data['name'] ?? doc.id}',
           latitude: effective?.latitude ?? _number(data['latitude']),
           longitude: effective?.longitude ?? _number(data['longitude']),
-          status: '${data['status'] ?? 'idle'}', type: '${data['type'] ?? 'Jeep'}',
+          status: '${data['status'] ?? 'idle'}',
+          type: '${data['type'] ?? 'Jeep'}',
           speedKmh: _number(data['speedKmh']),
-          routeDirection: data['routeDirection'] as String?, lastGpsAt: effectiveAt,
+          routeDirection: data['routeDirection'] as String?,
+          lastGpsAt: effectiveAt,
           locationSource: locationSource,
         );
-        if (bus.hasFreshGps && bus.latitude.isFinite && bus.longitude.isFinite &&
-            bus.latitude.abs() <= 90 && bus.longitude.abs() <= 180 &&
-            (bus.latitude != 0 || bus.longitude != 0)) result.add(bus);
+        if (bus.hasFreshGps &&
+            bus.latitude.isFinite &&
+            bus.longitude.isFinite &&
+            bus.latitude.abs() <= 90 &&
+            bus.longitude.abs() <= 180 &&
+            (bus.latitude != 0 || bus.longitude != 0))
+          result.add(bus);
       }
       controller.add(result);
     }
-    vehiclesSub = _db.collection('vehicles').snapshots().listen(
-      (snapshot) { vehicles = snapshot; emit(); }, onError: controller.addError);
-    tripsSub = _db.collection('trips')
+
+    vehiclesSub = _db.collection('vehicles').snapshots().listen((snapshot) {
+      vehicles = snapshot;
+      emit();
+    }, onError: controller.addError);
+    tripsSub = _db
+        .collection('trips')
         .where('userId', isEqualTo: _auth.currentUser?.uid ?? '__signed_out__')
-        .snapshots().listen((snapshot) { trips = snapshot; emit(); },
-            onError: controller.addError);
+        .snapshots()
+        .listen((snapshot) {
+          trips = snapshot;
+          emit();
+        }, onError: controller.addError);
     return controller.stream;
   }
 
@@ -750,11 +766,19 @@ class PassengerFirebaseService {
   }
 
   Future<double> getMinimumTopUpCredits() async {
-    final snapshot = await _db.collection('settings').doc('credits').get(
-      const GetOptions(source: Source.server),
-    );
+    final snapshot = await _db
+        .collection('settings')
+        .doc('credits')
+        .get(const GetOptions(source: Source.server));
     return (snapshot.data()?['minimumTopUpCredits'] as num?)?.toDouble() ?? 1;
   }
+
+  Stream<int> watchOverstayingPenaltyCredits() =>
+      _db.collection('settings').doc('credits').snapshots().map((snapshot) {
+        final value = snapshot.data()?['overstayingPenaltyCredits'];
+        final credits = value is num ? value.toInt() : 10;
+        return credits >= 1 && credits <= 10000 ? credits : 10;
+      });
 
   Future<List<TopUpRequest>> getTopUpRequests(String uid) async {
     final snapshot = await _db
@@ -787,7 +811,9 @@ class PassengerFirebaseService {
     }
     final minimum = await getMinimumTopUpCredits();
     if (amount < minimum) {
-      throw ArgumentError('Minimum top-up is PHP ${minimum.toStringAsFixed(2)}.');
+      throw ArgumentError(
+        'Minimum top-up is PHP ${minimum.toStringAsFixed(2)}.',
+      );
     }
     if (screenshotBytes.isEmpty || screenshotBytes.length > 800 * 1024) {
       throw ArgumentError('Use a receipt image smaller than 800 KB.');
@@ -992,15 +1018,19 @@ class PassengerFirebaseService {
     return getProfile(uid);
   }
 
-  Future<({double fare, String direction, String directionLabel, String fareType})> previewBoardingFare(
-      String bookingId, String vehicleId) async {
+  Future<
+    ({double fare, String direction, String directionLabel, String fareType})
+  >
+  previewBoardingFare(String bookingId, String vehicleId) async {
     final results = await Future.wait([
       _db.collection('trips').doc(bookingId).get(),
       _db.collection('vehicles').doc(vehicleId).get(),
     ]);
     final trip = results[0].data();
     final vehicle = results[1].data();
-    if (trip == null || vehicle == null || trip['status'] != 'waiting' ||
+    if (trip == null ||
+        vehicle == null ||
+        trip['status'] != 'waiting' ||
         !vehicleGpsIsFresh(vehicle)) {
       throw StateError('Booking or vehicle is no longer available.');
     }
@@ -1010,20 +1040,25 @@ class PassengerFirebaseService {
     }
     final routes = await getRoutes();
     final pickup = routes.indexWhere((r) => r['id'] == trip['pickupRouteId']);
-    final dropOff = routes.indexWhere((r) => r['id'] == trip['destinationRouteId']);
+    final dropOff = routes.indexWhere(
+      (r) => r['id'] == trip['destinationRouteId'],
+    );
     if (pickup < 0 || dropOff < 0 || pickup == dropOff) {
       throw StateError('The booked route is no longer active.');
     }
     final roundTrip = direction == 'towardLastStop'
-        ? dropOff < pickup : dropOff > pickup;
+        ? dropOff < pickup
+        : dropOff > pickup;
     final fares = await getFareSettings();
     final count = (trip['passengerCount'] as num?)?.toInt() ?? 1;
-    return (fare: (roundTrip ? fares.roundTripFare : fares.defaultFare) * count,
-        direction: direction,
-        directionLabel: direction == 'towardLastStop'
-            ? '${routes.first['name']} → ${routes.last['name']}'
-            : '${routes.last['name']} → ${routes.first['name']}',
-        fareType: roundTrip ? 'Round trip' : 'Regular');
+    return (
+      fare: (roundTrip ? fares.roundTripFare : fares.defaultFare) * count,
+      direction: direction,
+      directionLabel: direction == 'towardLastStop'
+          ? '${routes.first['name']} → ${routes.last['name']}'
+          : '${routes.last['name']} → ${routes.first['name']}',
+      fareType: roundTrip ? 'Round trip' : 'Regular',
+    );
   }
 
   Future<void> completeRide(String uid, String bookingId) async {
@@ -1092,7 +1127,12 @@ class PassengerFirebaseService {
   }
 
   static Passenger _passenger(String uid, Map<String, dynamic> data) =>
-      Passenger.fromJson({'id': uid, ...data});
+      Passenger.fromJson({
+        'id': uid,
+        ...data,
+        'email': data['recoveryEmail'] ?? data['email'] ?? '',
+        'emailVerified': data['recoveryEmailVerified'] == true,
+      });
 
   static double _number(Object? value, {double fallback = 0}) =>
       (value as num?)?.toDouble() ?? double.tryParse('$value') ?? fallback;

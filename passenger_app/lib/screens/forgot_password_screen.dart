@@ -34,7 +34,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         builder: (context) => AlertDialog(
           title: const Text('Check your email'),
           content: const Text(
-            'If this email is linked to an account, a password-reset link has been sent. Open it to choose a new password, then return here and sign in.',
+            'If this is a verified recovery email, a password-reset link has been sent. Open it to choose a new password, then sign in with your passenger ID.',
           ),
           actions: [
             FilledButton(
@@ -71,7 +71,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Enter the email address linked to your account. We will send a password-reset link.',
+              'Enter the recovery email you verified in your passenger profile. Your sign-in remains your passenger ID.',
             ),
             const SizedBox(height: 24),
             _field(

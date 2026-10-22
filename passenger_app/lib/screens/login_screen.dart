@@ -80,6 +80,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+    backgroundColor: Colors.white,
     body: SafeArea(
       child: Form(
         key: formKey,
@@ -87,10 +88,11 @@ class _LoginScreenState extends State<LoginScreen> {
           padding: const EdgeInsets.all(28),
           children: [
             const SizedBox(height: 70),
-            const Icon(
-              Icons.directions_bus_rounded,
-              color: Color(0xFF62A77D),
-              size: 58,
+            Image.asset(
+              'assets/branding/jeep_launcher.png',
+              width: 88,
+              height: 88,
+              fit: BoxFit.contain,
             ),
             const SizedBox(height: 28),
             const Text(
@@ -106,11 +108,13 @@ class _LoginScreenState extends State<LoginScreen> {
               controller: idNumberController,
               validator: validateRequired,
               keyboardType: TextInputType.number,
+              maxLength: 9,
               decoration: const InputDecoration(
                 labelText: 'ID number',
                 prefixIcon: Icon(Icons.badge_outlined),
                 filled: true,
                 fillColor: Colors.white,
+                counterText: '',
               ),
             ),
             const SizedBox(height: 16),

@@ -18,8 +18,11 @@ class _SettingsPageState extends State<SettingsPage> {
   final _seconds = TextEditingController();
   final _registrationCredits = TextEditingController();
   final _minimumTopUp = TextEditingController();
+  final _overstayPenalty = TextEditingController();
   bool _creditSettingsLoaded = false;
   bool _savingCredits = false;
+  bool _overstayPenaltyLoaded = false;
+  bool _savingOverstayPenalty = false;
   bool _savingTiming = false;
   bool _timingLoaded = false;
   bool _savingFuel = false;
@@ -29,6 +32,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _seconds.dispose();
     _registrationCredits.dispose();
     _minimumTopUp.dispose();
+    _overstayPenalty.dispose();
     super.dispose();
   }
 
@@ -77,6 +81,23 @@ class _SettingsPageState extends State<SettingsPage> {
       _message('Could not save credit settings: $error');
     } finally {
       if (mounted) setState(() => _savingCredits = false);
+    }
+  }
+
+  Future<void> _saveOverstayPenalty() async {
+    final credits = int.tryParse(_overstayPenalty.text.trim());
+    if (credits == null || credits < 1 || credits > 10000) {
+      _message('Enter a whole number of credits between 1 and 10,000.');
+      return;
+    }
+    setState(() => _savingOverstayPenalty = true);
+    try {
+      await FirebaseService.instance.updateOverstayPenalty(credits);
+      _message('Overstaying penalty saved.');
+    } catch (error) {
+      _message('Could not save overstaying penalty: $error');
+    } finally {
+      if (mounted) setState(() => _savingOverstayPenalty = false);
     }
   }
 
@@ -502,6 +523,79 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: 14),
         StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: FirebaseService.instance.watchDocument('settings', 'credits'),
+          builder: (context, snapshot) {
+            final credits = (snapshot.data?.data()?['overstayingPenaltyCredits'] as num?)
+                    ?.toInt() ??
+                10;
+            if (!_overstayPenaltyLoaded && snapshot.hasData) {
+              _overstayPenalty.text = '$credits';
+              _overstayPenaltyLoaded = true;
+            }
+            return SizedBox(
+              width: 700,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.warning_amber_rounded),
+                          SizedBox(width: 12),
+                          Text('Overstaying penalty', style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.w800)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      const Text('This amount is deducted when the trusted system confirms an overstaying violation. It also controls the warning shown to passengers.'),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 240,
+                            child: TextField(
+                              controller: _overstayPenalty,
+                              enabled: !_savingOverstayPenalty && _overstayPenaltyLoaded,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                              decoration: const InputDecoration(
+                                labelText: 'Overstaying credits penalty',
+                                suffixText: 'credits',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          FilledButton.icon(
+                            onPressed: _savingOverstayPenalty || !_overstayPenaltyLoaded
+                                ? null
+                                : _saveOverstayPenalty,
+                            icon: const Icon(Icons.save_outlined),
+                            label: const Text('Save'),
+                          ),
+                        ],
+                      ),
+                      if (snapshot.hasError)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text('Could not load penalty setting: ${snapshot.error}'),
+                        )
+                      else
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text('Current penalty: $credits credits'),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 14),
+        StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
           stream: FirebaseService.instance.watchDocument(
             'settings',
             'vehicleStatus',
@@ -684,26 +778,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
         const SizedBox(height: 14),
-        const SizedBox(
-          width: 700,
-          child: Card(
-            child: Padding(
-              padding: EdgeInsets.all(20),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.admin_panel_settings_outlined),
-                  SizedBox(width: 14),
-                  Expanded(
-                    child: Text(
-                      'Admin accounts cannot be created in this app. The system owner must provision admin accounts in the authentication system and assign an Admin profile.',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
       ],
     ),
   );

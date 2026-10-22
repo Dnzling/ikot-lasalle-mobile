@@ -1,6 +1,13 @@
 // Authenticated passenger operations. The caller's Firebase ID token is the
 // identity; no passenger ID or fare supplied by the phone is trusted.
+import {
+  handleRecoveryEmailAction,
+  requestRecoveryPasswordReset,
+  startRecoveryEmailVerification,
+} from './recovery.js';
+
 export async function handleAppApi(req, res, {admin, db}) {
+  if (await handleRecoveryEmailAction(req, res, {admin, db})) return true;
   if (!req.url?.startsWith('/api/')) return false;
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -15,6 +22,14 @@ export async function handleAppApi(req, res, {admin, db}) {
     return true;
   }
   try {
+    if (req.url === '/api/recovery/request-reset') {
+      const body = await readJson(req);
+      const result = await requestRecoveryPasswordReset({
+        admin, db, email: body.email, req,
+      });
+      res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify(result));
+      return true;
+    }
     const token = /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
     if (!token) throw new Error('Authentication required.');
     const {uid} = await admin.auth().verifyIdToken(token, true);
@@ -23,7 +38,11 @@ export async function handleAppApi(req, res, {admin, db}) {
       ? await boardRide({admin, db, uid, body})
       : req.url === '/api/arrive'
         ? await arrive({admin, db, uid, body})
-        : null;
+        : req.url === '/api/recovery/start-verification'
+          ? await startRecoveryEmailVerification({
+            admin, db, uid, email: body.email, req,
+          })
+          : null;
     if (!result) {
       res.writeHead(404).end();
       return true;

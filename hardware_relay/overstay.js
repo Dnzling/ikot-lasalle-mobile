@@ -1,4 +1,4 @@
-const penalty = 10;
+const DEFAULT_PENALTY_CREDITS = 10;
 
 function distanceMeters(a, b) {
   const rad = (n) => n * Math.PI / 180;
@@ -13,6 +13,10 @@ export async function processOverstays({admin, db, vehicleId, latitude, longitud
   const trips = (await db.collection('trips').where('status', '==', 'onboard').get())
     .docs.filter((doc) => doc.data().vehicleId === vehicleId);
   if (!trips.length) return;
+  const penaltySnapshot = await db.collection('settings').doc('credits').get();
+  const configuredPenalty = Number(penaltySnapshot.data()?.overstayingPenaltyCredits);
+  const penalty = Number.isInteger(configuredPenalty) && configuredPenalty >= 1 && configuredPenalty <= 10000
+    ? configuredPenalty : DEFAULT_PENALTY_CREDITS;
   const routes = (await db.collection('routes').where('active', '==', true).get())
     .docs.filter((doc) => doc.data().archived !== true && doc.data().location)
     .sort((a, b) => (Number(a.data().order) || 0) - (Number(b.data().order) || 0));
@@ -58,8 +62,8 @@ export async function processOverstays({admin, db, vehicleId, latitude, longitud
       });
       tx.set(db.collection('notifications').doc(), {
         userId: trip.userId, type: 'violation',
-        title: 'Overstaying: 10 credits deducted',
-        message: `You are overstaying. 10 credits were deducted. Please drop off at ${nextRoute}.`,
+        title: `Overstaying: ${penalty} credits deducted`,
+        message: `You are overstaying. ${penalty} credits were deducted. Please drop off at ${nextRoute}.`,
         createdAt: stamp,
       });
     });
