@@ -268,7 +268,6 @@ class _WaitingScreenState extends State<WaitingScreen> {
 
   void _checkArrivalGeofence() {
     if (!boarded || arrived || completingArrival) return;
-    if (assignedVehicle?.locationSource != 'hardware') return;
     final stop = destinationStop;
     final distance = _distanceToDestination;
     if (stop == null || distance == null) return;
@@ -296,23 +295,23 @@ class _WaitingScreenState extends State<WaitingScreen> {
     bool? confirmed;
     try {
       confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Your stop is here'),
-        content: Text(
-          'The jeep has reached ${widget.destination}. Tap I have arrived only after you get off.',
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Your stop is here'),
+          content: Text(
+            'The jeep has reached ${widget.destination}. Tap I have arrived only after you get off.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Still onboard'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('I have arrived'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Still onboard'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('I have arrived'),
-          ),
-        ],
-      ),
       );
     } finally {
       await _stopAlertSound();
@@ -335,7 +334,6 @@ class _WaitingScreenState extends State<WaitingScreen> {
     final vehicle = assignedVehicle;
     if (stop == null ||
         vehicle == null ||
-        vehicle.locationSource != 'hardware' ||
         geo.Geolocator.distanceBetween(
               vehicle.latitude,
               vehicle.longitude,
@@ -368,24 +366,24 @@ class _WaitingScreenState extends State<WaitingScreen> {
         await showDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('You are overstaying'),
+            title: const Text('You are overstaying'),
           content: Text(
             'You are overstaying. $overstayPenaltyCredits credits will be deducted. Please drop off at $nextRoute. If you already got off, tap I have arrived.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Still onboard'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  Navigator.pop(dialogContext);
+                  showArrival();
+                },
+                child: const Text('I have arrived'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Still onboard'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext);
-                showArrival();
-              },
-              child: const Text('I have arrived'),
-            ),
-          ],
-        ),
         );
       } finally {
         await _stopAlertSound();
@@ -467,21 +465,29 @@ class _WaitingScreenState extends State<WaitingScreen> {
       }
       final service = const PassengerFirebaseService();
       final preview = await service.previewBoardingFare(
-        widget.bookingId, payload['vehicleId'] as String);
+        widget.bookingId,
+        payload['vehicleId'] as String,
+      );
       if (!mounted) return;
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           title: const Text('Confirm boarding fare'),
-          content: Text('${preview.fareType} fare for ${widget.passengerCount} '
-              'passenger${widget.passengerCount == 1 ? '' : 's'}: '
-              'PHP ${preview.fare.toStringAsFixed(2)}. '
-              'Vehicle direction: ${preview.directionLabel}.'),
+          content: Text(
+            '${preview.fareType} fare for ${widget.passengerCount} '
+            'passenger${widget.passengerCount == 1 ? '' : 's'}: '
+            'PHP ${preview.fare.toStringAsFixed(2)}. '
+            'Vehicle direction: ${preview.directionLabel}.',
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
-                child: const Text('Confirm and board')),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Confirm and board'),
+            ),
           ],
         ),
       );
@@ -585,7 +591,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-              boarded ? 'PAID FARE' : 'FARE',
+                boarded ? 'PAID FARE' : 'FARE',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 12,
@@ -594,7 +600,8 @@ class _WaitingScreenState extends State<WaitingScreen> {
               ),
               SizedBox(height: 8),
               Text(
-                boarded ? 'PHP ${(boardedFare ?? widget.fare).toStringAsFixed(2)}'
+                boarded
+                    ? 'PHP ${(boardedFare ?? widget.fare).toStringAsFixed(2)}'
                     : 'Calculated when you board',
                 style: TextStyle(
                   color: Colors.white,
@@ -656,15 +663,18 @@ class _WaitingScreenState extends State<WaitingScreen> {
           const SizedBox(height: 8),
           Text(
             'Overstaying is punishable with $overstayPenaltyCredits credits.',
-            style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: Colors.deepOrange,
+              fontWeight: FontWeight.w700,
+            ),
           ),
           const SizedBox(height: 8),
           Text(
             assignedVehicle?.routeDirection == 'towardLastStop'
                 ? 'Vehicle direction: ${firstRouteName ?? 'First stop'} → ${lastRouteName ?? 'Last stop'}'
                 : assignedVehicle?.routeDirection == 'towardFirstStop'
-                    ? 'Vehicle direction: ${lastRouteName ?? 'Last stop'} → ${firstRouteName ?? 'First stop'}'
-                    : 'Vehicle direction: waiting for GPS',
+                ? 'Vehicle direction: ${lastRouteName ?? 'Last stop'} → ${firstRouteName ?? 'First stop'}'
+                : 'Vehicle direction: waiting for GPS',
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 8),

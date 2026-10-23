@@ -10,14 +10,10 @@
 #include <bearssl/bearssl.h>
 
 
-
-
 // Arduino IDE generates .ino function prototypes before the definitions below.
 // Forward-declare these types so those generated prototypes can compile.
 enum class CloudStatus : uint8_t;
 struct GpsCacheRecord;
-
-
 
 
 // =====================================================
@@ -49,8 +45,6 @@ const char* VEHICLE_TYPE = "Jeep";
 // SIM808 TXD -> NodeMCU D6 / GPIO12
 // SIM808 RXD -> NodeMCU D7 / GPIO13
 // SIM808 GND -> NodeMCU GND
-
-
 
 
 #define SIM808_RX D6
@@ -1272,6 +1266,30 @@ void saveGpsCacheIfNeeded() {
 
 
 
+void updateRouteDirectionAtEndpoint() {
+  if (!gpsHasFix || routeStopCount < 2) return;
+
+  int endpointIndex = -1;
+  double endpointDistance = 1e9;
+  const int endpoints[] = {0, routeStopCount - 1};
+  for (int index : endpoints) {
+    const RouteStop& stop = routeStops[index];
+    const double distance = distanceMeters(gpsLatitude, gpsLongitude,
+        stop.latitude, stop.longitude);
+    if (distance <= stop.radius && distance < endpointDistance) {
+      endpointIndex = index;
+      endpointDistance = distance;
+    }
+  }
+  if (endpointIndex < 0) return;
+
+  const bool towardLast = endpointIndex == 0;
+  if (routeMovingTowardLastStop == towardLast) return;
+  routeMovingTowardLastStop = towardLast;
+  saveRouteDirection();
+  nextGPSUploadAttempt = millis();
+}
+
 void updateCurrentStop() {
   if (!gpsHasFix || routeStopCount == 0) return;
 
@@ -1282,6 +1300,10 @@ void updateCurrentStop() {
     expectedOffboardingCount = 0;
     return;
   }
+
+  // Check endpoints before the current-stop hysteresis early return, which
+  // can otherwise mask arrival at the terminal.
+  updateRouteDirectionAtEndpoint();
 
 
 
@@ -2043,6 +2065,16 @@ void syncVehicleDataRelay() {
   dbVehicleStatus = response["status"].as<String>();
   dbVehicleStatus.toUpperCase();
   dbLocationLabel = response["locationLabel"].as<String>();
+  const String serverDirection = response["routeDirection"].as<String>();
+  if (serverDirection == "towardLastStop" ||
+      serverDirection == "towardFirstStop") {
+    const bool towardLast = serverDirection == "towardLastStop";
+    if (routeMovingTowardLastStop != towardLast) {
+      routeMovingTowardLastStop = towardLast;
+      saveRouteDirection();
+      nextGPSUploadAttempt = millis();
+    }
+  }
   onboardCount = response["onboard"].as<int>();
   expectedOffboardingCount = 0;
   const int step = routeMovingTowardLastStop ? 1 : -1;
@@ -2052,7 +2084,14 @@ void syncVehicleDataRelay() {
       ? candidate : getEtaTargetStopIndex();
   if (nextStopIndex >= 0) {
     const String routeId = routeStops[nextStopIndex].id;
-    expectedOffboardingCount = response["expected"][routeId].as<int>();
+    JsonVariantConst expected = response["expected"][routeId.c_str()];
+    expectedOffboardingCount = expected.is<int>()
+        ? expected.as<int>() : expected.as<unsigned int>();
+    Serial.printf("Vehicle DB sync: onboard=%d, nextStop=%s, expectedOff=%d\n",
+        onboardCount, routeId.c_str(), expectedOffboardingCount);
+  } else {
+    Serial.printf("Vehicle DB sync: onboard=%d, no next stop selected\n",
+        onboardCount);
   }
   vehicleDataLoaded = true;
   drawCurrentLCDPage();

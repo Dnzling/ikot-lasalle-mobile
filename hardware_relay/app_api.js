@@ -5,6 +5,8 @@ import {
   requestRecoveryPasswordReset,
   startRecoveryEmailVerification,
 } from './recovery.js';
+import {processOverstays} from './overstay.js';
+import {routeDirectionAtEndpoint} from './route_direction.js';
 
 export async function handleAppApi(req, res, {admin, db}) {
   if (await handleRecoveryEmailAction(req, res, {admin, db})) return true;
@@ -38,6 +40,8 @@ export async function handleAppApi(req, res, {admin, db}) {
       ? await boardRide({admin, db, uid, body})
       : req.url === '/api/arrive'
         ? await arrive({admin, db, uid, body})
+        : req.url === '/api/vehicle/phone-gps'
+          ? await publishOnboardPhoneGps({admin, db, uid, body})
         : req.url === '/api/recovery/start-verification'
           ? await startRecoveryEmailVerification({
             admin, db, uid, email: body.email, req,
@@ -210,4 +214,65 @@ async function arrive({admin, db, uid, body}) {
     });
     return {ok: true};
   });
+}
+
+async function publishOnboardPhoneGps({admin, db, uid, body}) {
+  const bookingId = requireId(body.bookingId);
+  const latitude = Number(body.latitude);
+  const longitude = Number(body.longitude);
+  const accuracy = Number(body.accuracyMeters);
+  const speedKmh = Number(body.speedKmh ?? 0);
+  const capturedAtMs = Number(body.capturedAtMs);
+  if (![latitude, longitude, accuracy, speedKmh].every(Number.isFinite) ||
+      !Number.isFinite(capturedAtMs) || Math.abs(Date.now() - capturedAtMs) > 15000 ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 ||
+      (latitude === 0 && longitude === 0) || accuracy < 0 || accuracy > 30 ||
+      speedKmh < 0 || speedKmh > 250) {
+    throw new Error('Invalid passenger GPS fix.');
+  }
+
+  const tripRef = db.collection('trips').doc(bookingId);
+  const tripSnapshot = await tripRef.get();
+  const trip = tripSnapshot.data();
+  if (!trip || trip.userId !== uid || trip.status !== 'onboard' || !trip.vehicleId) {
+    throw new Error('An active onboard ride is required to publish vehicle GPS.');
+  }
+  const vehicleRef = db.collection('vehicles').doc(requireId(trip.vehicleId));
+  const endpointDirection = await routeDirectionAtEndpoint(db, latitude, longitude);
+  const result = await db.runTransaction(async (tx) => {
+    const [freshTripDoc, vehicleDoc] = await Promise.all([
+      tx.get(tripRef), tx.get(vehicleRef),
+    ]);
+    const freshTrip = freshTripDoc.data();
+    const vehicle = vehicleDoc.data();
+    if (!freshTrip || freshTrip.userId !== uid || freshTrip.status !== 'onboard' ||
+        freshTrip.vehicleId !== vehicleRef.id || !vehicle || vehicle.archived === true) {
+      throw new Error('The onboard ride or vehicle is no longer active.');
+    }
+    const routeDirection = endpointDirection ||
+      (['towardLastStop', 'towardFirstStop'].includes(vehicle.routeDirection)
+        ? vehicle.routeDirection
+        : freshTrip.routeDirectionAtBoarding);
+    const location = new admin.firestore.GeoPoint(latitude, longitude);
+    tx.update(vehicleRef, {
+      location, latitude, longitude, speedKmh,
+      lastGpsAt: admin.firestore.FieldValue.serverTimestamp(),
+      locationSource: 'passenger',
+      phoneGpsAccuracyMeters: accuracy,
+      routeDirection,
+    });
+    tx.update(tripRef, {
+      phoneLocation: location,
+      phoneGpsAt: admin.firestore.FieldValue.serverTimestamp(),
+      phoneGpsAccuracyMeters: accuracy,
+    });
+    return {routeDirection};
+  });
+
+  // Vehicle location is committed before acknowledging the phone. Overstay
+  // evaluation uses the same authoritative point as maps and arrival checks.
+  void processOverstays({admin, db, vehicleId: vehicleRef.id, latitude, longitude,
+    routeDirection: result.routeDirection})
+    .catch((error) => console.error('Overstay check failed:', error.message));
+  return {ok: true, locationSource: 'passenger'};
 }

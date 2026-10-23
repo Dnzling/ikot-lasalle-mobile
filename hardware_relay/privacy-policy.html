@@ -36,7 +36,7 @@
       <ul>
         <li><strong>Account and profile:</strong> passenger ID, name, user type, phone number, recovery email, and account/session details. Firebase Authentication manages sign-in credentials; the app does not store your password as plain text.</li>
         <li><strong>Ride and credit records:</strong> pickup and destination stops, vehicle, passenger count, fare, ride status, credits, top-up amount, GCash reference number, receipt image, and related review or notification records.</li>
-        <li><strong>Location:</strong> your location while using map and ride features. While you are onboard, one selected passenger device may periodically provide location to help update the vehicle position when its hardware GPS is unavailable. Location is used for live maps, nearby stops, route progress, arrival checks, and safety/overstay functions.</li>
+        <li><strong>Location:</strong> your location while using map and ride features. While a passenger is onboard, the passenger app may periodically use that passenger device's GPS as the vehicle's live location. Vehicle hardware GPS is used when no passenger is onboard. Location is used for live maps, nearby stops, route progress, arrival checks, and safety/overstay functions.</li>
         <li><strong>Camera and photos:</strong> camera access is used to scan a vehicle QR code. If you submit a top-up, you choose a receipt image from your gallery; the app sends it for text recognition and stores it with your top-up request for review.</li>
       </ul>
 

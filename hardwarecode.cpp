@@ -1176,6 +1176,30 @@ void saveGpsCacheIfNeeded() {
 
 
 
+void updateRouteDirectionAtEndpoint() {
+  if (!gpsHasFix || routeStopCount < 2) return;
+
+  int endpointIndex = -1;
+  double endpointDistance = 1e9;
+  const int endpoints[] = {0, routeStopCount - 1};
+  for (int index : endpoints) {
+    const RouteStop& stop = routeStops[index];
+    const double distance = distanceMeters(gpsLatitude, gpsLongitude,
+        stop.latitude, stop.longitude);
+    if (distance <= stop.radius && distance < endpointDistance) {
+      endpointIndex = index;
+      endpointDistance = distance;
+    }
+  }
+  if (endpointIndex < 0) return;
+
+  const bool towardLast = endpointIndex == 0;
+  if (routeMovingTowardLastStop == towardLast) return;
+  routeMovingTowardLastStop = towardLast;
+  saveRouteDirection();
+  lastGPSUpload = millis() - GPS_UPLOAD_INTERVAL;
+}
+
 void updateCurrentStop() {
   if (!gpsHasFix || routeStopCount == 0) return;
 
@@ -1186,6 +1210,10 @@ void updateCurrentStop() {
     expectedOffboardingCount = 0;
     return;
   }
+
+  // Check route endpoints before the current-stop hysteresis early return.
+  // Otherwise a nearby previous stop can mask arrival at the terminal.
+  updateRouteDirectionAtEndpoint();
 
 
 
@@ -1916,6 +1944,16 @@ void syncVehicleDataRelay() {
   dbVehicleStatus = response["status"].as<String>();
   dbVehicleStatus.toUpperCase();
   dbLocationLabel = response["locationLabel"].as<String>();
+  const String serverDirection = response["routeDirection"].as<String>();
+  if (serverDirection == "towardLastStop" ||
+      serverDirection == "towardFirstStop") {
+    const bool towardLast = serverDirection == "towardLastStop";
+    if (routeMovingTowardLastStop != towardLast) {
+      routeMovingTowardLastStop = towardLast;
+      saveRouteDirection();
+      lastGPSUpload = millis() - GPS_UPLOAD_INTERVAL;
+    }
+  }
   onboardCount = response["onboard"].as<int>();
   expectedOffboardingCount = 0;
   const int step = routeMovingTowardLastStop ? 1 : -1;
@@ -1925,7 +1963,14 @@ void syncVehicleDataRelay() {
       ? candidate : getEtaTargetStopIndex();
   if (nextStopIndex >= 0) {
     const String routeId = routeStops[nextStopIndex].id;
-    expectedOffboardingCount = response["expected"][routeId].as<int>();
+    JsonVariantConst expected = response["expected"][routeId.c_str()];
+    expectedOffboardingCount = expected.is<int>()
+        ? expected.as<int>() : expected.as<unsigned int>();
+    Serial.printf("Vehicle DB sync: onboard=%d, nextStop=%s, expectedOff=%d\n",
+        onboardCount, routeId.c_str(), expectedOffboardingCount);
+  } else {
+    Serial.printf("Vehicle DB sync: onboard=%d, no next stop selected\n",
+        onboardCount);
   }
   vehicleDataLoaded = true;
   drawCurrentLCDPage();

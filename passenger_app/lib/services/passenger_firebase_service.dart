@@ -134,20 +134,26 @@ class PassengerFirebaseService {
     required String vehicleId,
     required geo.Position position,
   }) async {
+    final fixAge = DateTime.now().difference(position.timestamp);
     if (position.accuracy > 30 ||
         position.accuracy < 0 ||
-        DateTime.now().difference(position.timestamp) >
-            const Duration(seconds: 10) ||
+        fixAge < const Duration(seconds: -5) ||
+        fixAge > const Duration(seconds: 10) ||
         !(await isSelectedPhoneReporter(
           uid: uid,
           bookingId: bookingId,
           vehicleId: vehicleId,
         )))
       return;
-    await _db.collection('trips').doc(bookingId).update({
-      'phoneLocation': GeoPoint(position.latitude, position.longitude),
-      'phoneGpsAt': FieldValue.serverTimestamp(),
-      'phoneGpsAccuracyMeters': position.accuracy,
+    await _trustedRequest('/api/vehicle/phone-gps', {
+      'bookingId': bookingId,
+      'latitude': position.latitude,
+      'longitude': position.longitude,
+      'accuracyMeters': position.accuracy,
+      'capturedAtMs': position.timestamp.millisecondsSinceEpoch,
+      'speedKmh': position.speed.isFinite && position.speed > 0
+          ? position.speed * 3.6
+          : 0,
     });
   }
 
@@ -584,84 +590,28 @@ class PassengerFirebaseService {
 
   Stream<List<BusLocation>> watchBusLocations() {
     late StreamSubscription<QuerySnapshot<Map<String, dynamic>>> vehiclesSub;
-    late StreamSubscription<QuerySnapshot<Map<String, dynamic>>> tripsSub;
-    QuerySnapshot<Map<String, dynamic>>? vehicles;
-    QuerySnapshot<Map<String, dynamic>>? trips;
     final controller = StreamController<List<BusLocation>>(
-      onCancel: () async {
-        await vehiclesSub.cancel();
-        await tripsSub.cancel();
-      },
+      onCancel: () => vehiclesSub.cancel(),
     );
-    void emit() {
-      final current = vehicles;
-      if (current == null || controller.isClosed) return;
-      final now = DateTime.now();
-      final candidates = <String, List<Map<String, dynamic>>>{};
-      for (final trip
-          in trips?.docs ?? <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
-        final data = trip.data();
-        final vehicleId = '${data['vehicleId'] ?? ''}';
-        if (vehicleId.isEmpty ||
-            data['status'] != 'onboard' ||
-            data['phoneLocation'] is! GeoPoint ||
-            data['phoneGpsAt'] is! Timestamp ||
-            (_number(data['phoneGpsAccuracyMeters'], fallback: 999) > 30))
-          continue;
-        final age = now.difference((data['phoneGpsAt'] as Timestamp).toDate());
-        if (age.isNegative || age > const Duration(seconds: 10)) continue;
-        candidates.putIfAbsent(vehicleId, () => []).add(data);
-      }
+    void emit(QuerySnapshot<Map<String, dynamic>> current) {
+      if (controller.isClosed) return;
       final result = <BusLocation>[];
       for (final doc in current.docs) {
         final data = doc.data();
         if (data['archived'] == true) continue;
         final point = data['location'];
-        final hardware = point is GeoPoint ? point : null;
-        final hardwareAt = data['lastGpsAt'] as Timestamp?;
-        GeoPoint? effective = hardware;
-        DateTime? effectiveAt = hardwareAt?.toDate();
-        var locationSource = 'hardware';
-        final available = candidates[doc.id] ?? [];
-        available.sort(
-          (a, b) =>
-              ((a['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
-                  .compareTo(
-                    (b['boardedAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0,
-                  ),
-        );
-        for (final candidate in available) {
-          final phone = candidate['phoneLocation'] as GeoPoint;
-          final phoneAt = (candidate['phoneGpsAt'] as Timestamp).toDate();
-          if (hardware == null ||
-              hardwareAt == null ||
-              !phoneAt.isAfter(hardwareAt.toDate()) ||
-              now.difference(hardwareAt.toDate()) >
-                  const Duration(seconds: 120) ||
-              geo.Geolocator.distanceBetween(
-                    phone.latitude,
-                    phone.longitude,
-                    hardware.latitude,
-                    hardware.longitude,
-                  ) >
-                  500)
-            continue;
-          effective = phone;
-          effectiveAt = phoneAt;
-          locationSource = 'phone';
-          break;
-        }
+        final location = point is GeoPoint ? point : null;
         final bus = BusLocation(
           id: doc.id,
           label: '${data['name'] ?? doc.id}',
-          latitude: effective?.latitude ?? _number(data['latitude']),
-          longitude: effective?.longitude ?? _number(data['longitude']),
+          latitude: location?.latitude ?? _number(data['latitude']),
+          longitude: location?.longitude ?? _number(data['longitude']),
           status: '${data['status'] ?? 'idle'}',
           type: '${data['type'] ?? 'Jeep'}',
           speedKmh: _number(data['speedKmh']),
           routeDirection: data['routeDirection'] as String?,
-          lastGpsAt: effectiveAt,
-          locationSource: locationSource,
+          lastGpsAt: (data['lastGpsAt'] as Timestamp?)?.toDate(),
+          locationSource: '${data['locationSource'] ?? 'hardware'}',
         );
         if (bus.hasFreshGps &&
             bus.latitude.isFinite &&
@@ -675,17 +625,8 @@ class PassengerFirebaseService {
     }
 
     vehiclesSub = _db.collection('vehicles').snapshots().listen((snapshot) {
-      vehicles = snapshot;
-      emit();
+      emit(snapshot);
     }, onError: controller.addError);
-    tripsSub = _db
-        .collection('trips')
-        .where('userId', isEqualTo: _auth.currentUser?.uid ?? '__signed_out__')
-        .snapshots()
-        .listen((snapshot) {
-          trips = snapshot;
-          emit();
-        }, onError: controller.addError);
     return controller.stream;
   }
 

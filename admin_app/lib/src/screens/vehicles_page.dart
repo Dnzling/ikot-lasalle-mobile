@@ -645,10 +645,7 @@ class _VehiclesPageState extends State<VehiclesPage> {
                                                   label: '${selected.data()['name'] ?? 'Vehicle'}',
                                                   vehicleType: '${selected.data()['type'] ?? 'Jeep'}',
                                                   plateNumber: '${selected.data()['plateNumber'] ?? ''}',
-                                                ), if (phone != null)
-                                                  Positioned(top: 12, left: 12,
-                                                    child: Chip(label: const Text('Phone GPS'))),
-                                                ]);
+                                                )]);
                                               },
                                             )),
                                             Positioned(

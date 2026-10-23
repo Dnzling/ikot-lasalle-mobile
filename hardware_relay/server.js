@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import admin from 'firebase-admin';
 import {handleAppApi} from './app_api.js';
 import {processOverstays} from './overstay.js';
+import {routeDirectionAtEndpoint} from './route_direction.js';
 
 const port = Number(process.env.PORT || 8080);
 const privacyPolicyHtml = readFileSync(new URL('./privacy-policy.html', import.meta.url), 'utf8');
@@ -83,29 +84,49 @@ async function execute(message) {
             !/^LOC: [^\r\n]+$/.test(locationLabel)))) {
       throw new Error('Invalid GPS payload.');
     }
+    const endpointDirection = await routeDirectionAtEndpoint(db, latitude, longitude);
+    let committedDirection = null;
+    let hardwareGpsApplied = false;
     const ref = db.collection('vehicles').doc(message.deviceId);
     await db.runTransaction(async (tx) => {
       const snapshot = await tx.get(ref);
       if (!snapshot.exists) throw new Error('Configured vehicle does not exist.');
-      const vehicleType = snapshot.data().type || type;
+      const vehicle = snapshot.data();
+      const vehicleType = vehicle.type || type;
       const update = {
-        location: new admin.firestore.GeoPoint(latitude, longitude),
-        latitude, longitude, speedKmh,
         status: vehicleType === 'E-Jeep' && status === 'fueling gas'
           ? 'active' : status,
-        lastGpsAt: admin.firestore.FieldValue.serverTimestamp(),
       };
+      // While passengers are onboard, their phone GPS is the vehicle's live
+      // location source. Keep hardware telemetry/status but don't overwrite it.
+      hardwareGpsApplied = (Number(vehicle.onBoardPassengers) || 0) <= 0;
+      if (hardwareGpsApplied) {
+        update.location = new admin.firestore.GeoPoint(latitude, longitude);
+        update.latitude = latitude;
+        update.longitude = longitude;
+        update.speedKmh = speedKmh;
+        update.lastGpsAt = admin.firestore.FieldValue.serverTimestamp();
+        update.locationSource = 'hardware';
+        update.phoneGpsAccuracyMeters = admin.firestore.FieldValue.delete();
+      }
+      const currentDirection = vehicle.routeDirection;
+      committedDirection = (hardwareGpsApplied ? endpointDirection : null) ||
+        (['towardLastStop', 'towardFirstStop'].includes(currentDirection)
+          ? currentDirection
+          : routeDirection);
+      if (committedDirection) update.routeDirection = committedDirection;
       if (locationLabel !== undefined) update.locationLabel = locationLabel;
-      if (routeDirection !== undefined) update.routeDirection = routeDirection;
       if (!snapshot.data().type && type) update.type = type;
       tx.update(ref, update);
     });
     // Acknowledge the GPS write as soon as Firestore commits it. Overstay
     // checks are ancillary and can take longer than the SIM808 HTTP window;
     // do not let their latency turn a saved GPS point into a lost ACK.
-    void processOverstays({admin, db, vehicleId: message.deviceId,
-      latitude, longitude, routeDirection})
-      .catch((error) => console.error('Overstay check failed:', error.message));
+    if (hardwareGpsApplied) {
+      void processOverstays({admin, db, vehicleId: message.deviceId,
+        latitude, longitude, routeDirection: committedDirection})
+        .catch((error) => console.error('Overstay check failed:', error.message));
+    }
     return {ok: true};
   }
   if (message.op === 'routes') {
@@ -155,6 +176,7 @@ async function execute(message) {
     const data = snapshot.data();
     return {ok: true, type: String(data.type || ''),
       status: String(data.status || ''),
+      routeDirection: String(data.routeDirection || ''),
       locationLabel: String(data.locationLabel || ''),
       onboard: Number(data.onBoardPassengers) || 0,
       expected: data.expectedOutboardByStop || {}};
